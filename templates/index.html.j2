@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>phototag — cluster report (run {{ run_id }})</title>
+<style>
+body { font-family: system-ui, sans-serif; margin: 2rem; color: #222; }
+h1 { margin-bottom: 0.2em; }
+.stats { color: #666; margin-bottom: 2rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { padding: 0.5rem 0.8rem; border-bottom: 1px solid #eee; text-align: left; }
+th { background: #fafafa; }
+tr:hover { background: #f4f7ff; }
+a { color: #345; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.noise { color: #999; }
+</style>
+</head>
+<body>
+<h1>Cluster report — run {{ run_id }}</h1>
+<div class="stats">
+  {{ total_images }} images · {{ n_clusters }} clusters · {{ n_noise }} noise
+</div>
+<table>
+  <thead>
+    <tr><th>#</th><th>Auto label</th><th>User label</th><th>Size</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for c in clusters %}
+    <tr {% if c.cluster_no == -1 %}class="noise"{% endif %}>
+      <td>{{ c.cluster_no }}</td>
+      <td>{{ c.label_auto }}</td>
+      <td>{{ c.label_user }}</td>
+      <td>{{ c.size }}</td>
+      <td><a href="cluster_{{ c.id }}.html">view →</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</body>
+</html>

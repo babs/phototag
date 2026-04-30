@@ -1,0 +1,103 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "phototag"
+version = "0.1.0"
+description = "Local photo tagging and clustering tool"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+    "structlog>=24.1",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "python-dotenv>=1",
+    "Pillow>=10",
+    "xxhash>=3.4",
+    "numpy>=1.26",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+ram = [
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "transformers>=4.30,<5",
+    "fairscale>=0.4",
+    "timm<1.0",
+    "ram @ git+https://github.com/xinyu1205/recognize-anything.git",
+]
+clip = [
+    "torch>=2.4",
+    "open_clip_torch>=2.24",
+]
+cluster = [
+    "scikit-learn>=1.4",
+    "umap-learn>=0.5.5",
+    "hdbscan>=0.8.33",
+]
+report = [
+    "jinja2>=3.1",
+    "matplotlib>=3.8",
+]
+heic = ["pillow-heif>=0.16"]
+raw = ["rawpy>=0.21"]
+exif = ["piexif>=1.1"]
+ui = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "fastapi-structured-logging>=0.5",
+    "jinja2>=3.1",
+]
+all = ["phototag[ram,clip,cluster,report,heic,raw,exif,ui]"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "mypy>=1.13",
+    "ruff>=0.8",
+    "pre-commit>=4",
+    "detect-secrets>=1.5",
+]
+
+[project.scripts]
+phototag = "phototag.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["phototag"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["phototag"]
+
+[tool.mypy]
+python_version = "3.14"
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+strict_optional = true
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: tests requiring downloaded models or large fixtures",
+    "e2e: end-to-end tests requiring external services",
+]

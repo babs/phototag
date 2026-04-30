@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cluster {{ c.cluster_no }} — run {{ run_id }}</title>
+<style>
+body { font-family: system-ui, sans-serif; margin: 2rem; color: #222; }
+h1 { margin-bottom: 0.1em; }
+.meta { color: #666; margin-bottom: 1.5rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.tile { border: 1px solid #eee; border-radius: 4px; overflow: hidden; background: #fff; }
+.tile img { width: 100%; height: 180px; object-fit: cover; display: block; }
+.tile .name { font-size: 0.75rem; padding: 4px 6px; color: #666; word-break: break-all; }
+a { color: #345; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.back { margin-bottom: 1rem; display: inline-block; }
+</style>
+</head>
+<body>
+<a class="back" href="index.html">← back to index</a>
+<h1>Cluster {{ c.cluster_no }}</h1>
+<div class="meta">
+  <strong>Auto label:</strong> {{ c.label_auto }}<br>
+  <strong>User label:</strong> {{ c.label_user or "—" }}<br>
+  <strong>Size:</strong> {{ c.size }}
+</div>
+<div class="grid">
+{% for t in c.thumbs %}
+  <div class="tile">
+    <a href="{{ t.src }}" target="_blank"><img src="{{ t.thumb }}" alt="{{ t.name }}"></a>
+    <div class="name">{{ t.name }}</div>
+  </div>
+{% endfor %}
+</div>
+</body>
+</html>
