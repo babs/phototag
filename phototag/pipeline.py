@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from .exif import extract_exif
 from .logging import get_logger
 from .models.base import Embedder, Tagger
 from .scanner import ScannedFile, hash_file, iter_images
@@ -140,13 +141,16 @@ def scan_and_tag(
                     counts["skipped"] += 1
                     continue
                 w, h = img.size
+                # Cheap once we already have the file open in memory; cluster naming
+                # and date filters benefit from EXIF being present from scan time.
+                exif = extract_exif(sf.path)
                 image_id = store.upsert_image(
                     path=spath,
                     hash_=content_hash,
                     mtime=sf.mtime,
                     width=w,
                     height=h,
-                    exif=None,
+                    exif=exif,
                     processed_at=_now_iso(),
                 )
                 to_infer.append((image_id, img))

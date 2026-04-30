@@ -87,7 +87,10 @@ class Store:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path, isolation_level=None)
+        # check_same_thread=False because the FastAPI UI runs sync endpoints in
+        # a threadpool. Concurrent reads under WAL are safe; writes happen in
+        # short transactions and we don't multi-write.
+        self.conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
@@ -169,6 +172,22 @@ class Store:
         cur = self.conn.execute("SELECT id,path,hash,mtime,width,height FROM images ORDER BY id")
         for row in cur:
             yield ImageRow(**dict(row))
+
+    def update_image_exif(self, image_id: int, exif: dict[str, Any] | None) -> None:
+        self.conn.execute(
+            "UPDATE images SET exif_json=? WHERE id=?",
+            (json.dumps(exif) if exif else None, image_id),
+        )
+
+    def get_image_exif(self, image_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT exif_json FROM images WHERE id=?", (image_id,)).fetchone()
+        if row is None or not row["exif_json"]:
+            return None
+        try:
+            data = json.loads(row["exif_json"])
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            return None
 
     def count_images(self) -> int:
         return int(self.conn.execute("SELECT COUNT(*) AS n FROM images").fetchone()["n"])
@@ -306,3 +325,140 @@ class Store:
 
     def set_cluster_label_user(self, cluster_id: int, label: str | None) -> None:
         self.conn.execute("UPDATE clusters SET label_user=? WHERE id=?", (label, cluster_id))
+
+    # ---- API helpers (for the UI) ----
+
+    def list_cluster_runs(self) -> list[dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT r.id, r.created_at, r.params_json,
+                   (SELECT COUNT(*) FROM clusters c WHERE c.run_id=r.id AND c.cluster_no!=-1)
+                       AS n_clusters,
+                   (SELECT IFNULL(SUM(c.size),0) FROM clusters c WHERE c.run_id=r.id AND c.cluster_no=-1)
+                       AS n_noise,
+                   (SELECT IFNULL(SUM(c.size),0) FROM clusters c WHERE c.run_id=r.id) AS total_images
+            FROM cluster_runs r
+            ORDER BY r.id DESC
+            """
+        )
+        return [dict(r) for r in cur]
+
+    def get_image(self, image_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT id, path, hash, mtime, width, height FROM images WHERE id=?",
+            (image_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def cluster_top_tags(self, cluster_id: int, *, top: int = 20) -> list[tuple[str, int]]:
+        cur = self.conn.execute(
+            """
+            SELECT t.name, COUNT(*) AS n
+            FROM image_clusters ic
+            JOIN image_tags it ON it.image_id = ic.image_id
+            JOIN tags t ON t.id = it.tag_id
+            WHERE ic.cluster_id=?
+            GROUP BY t.name ORDER BY n DESC LIMIT ?
+            """,
+            (cluster_id, top),
+        )
+        return [(r["name"], int(r["n"])) for r in cur]
+
+    def search_images_by_tags(
+        self,
+        tag_names: list[str],
+        *,
+        min_score: float = 0.0,
+        limit: int = 200,
+        run_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Images matching ALL tag_names with score >= min_score.
+
+        score = mean over the matched tags' scores. When run_id is given, returns
+        one row per image with that run's cluster (or NULLs); without run_id, the
+        cluster columns are NULL.
+        """
+        if not tag_names:
+            return []
+        placeholders = ",".join("?" * len(tag_names))
+        params: list[Any] = list(tag_names) + [float(min_score), len(tag_names)]
+        # Subquery the cluster join so the run_id filter scopes the join itself
+        # (predicate as JOIN-ON is broken: it leaves duplicate NULL rows).
+        if run_id is not None:
+            cluster_join = """
+                LEFT JOIN (
+                    SELECT ic.image_id,
+                           c.id AS cluster_id, c.cluster_no, c.label_auto,
+                           c.label_user, c.size AS cluster_size
+                    FROM image_clusters ic
+                    JOIN clusters c ON c.id = ic.cluster_id
+                    WHERE c.run_id = ?
+                ) cj ON cj.image_id = i.id
+            """
+            params.insert(len(tag_names) + 2, int(run_id))
+            select_cluster = "cj.cluster_id, cj.cluster_no, cj.label_auto, cj.label_user, cj.cluster_size"
+        else:
+            cluster_join = ""
+            select_cluster = (
+                "NULL AS cluster_id, NULL AS cluster_no, NULL AS label_auto, "
+                "NULL AS label_user, NULL AS cluster_size"
+            )
+        sql = f"""
+            WITH match AS (
+                SELECT it.image_id, AVG(it.score) AS score
+                FROM image_tags it
+                JOIN tags t ON t.id = it.tag_id
+                WHERE t.name IN ({placeholders}) AND it.score >= ?
+                GROUP BY it.image_id
+                HAVING COUNT(DISTINCT t.id) = ?
+            )
+            SELECT i.id, i.path, m.score, {select_cluster}
+            FROM match m
+            JOIN images i ON i.id = m.image_id
+            {cluster_join}
+            ORDER BY m.score DESC LIMIT ?
+        """
+        params.append(limit)
+        cur = self.conn.execute(sql, params)
+        return [dict(r) for r in cur]
+
+    def list_tag_names(self, *, prefix: str | None = None, limit: int = 50) -> list[tuple[str, int]]:
+        if prefix:
+            cur = self.conn.execute(
+                """
+                SELECT t.name, COUNT(*) AS n
+                FROM tags t JOIN image_tags it ON it.tag_id = t.id
+                WHERE t.name LIKE ?
+                GROUP BY t.name ORDER BY n DESC LIMIT ?
+                """,
+                (f"{prefix}%", limit),
+            )
+        else:
+            cur = self.conn.execute(
+                """
+                SELECT t.name, COUNT(*) AS n
+                FROM tags t JOIN image_tags it ON it.tag_id = t.id
+                GROUP BY t.name ORDER BY n DESC LIMIT ?
+                """,
+                (limit,),
+            )
+        return [(r["name"], int(r["n"])) for r in cur]
+
+    def list_image_tags(self, image_id: int, *, min_score: float = 0.0) -> list[tuple[str, float]]:
+        cur = self.conn.execute(
+            """
+            SELECT t.name, it.score FROM image_tags it
+            JOIN tags t ON t.id = it.tag_id
+            WHERE it.image_id=? AND it.score >= ?
+            ORDER BY it.score DESC
+            """,
+            (image_id, float(min_score)),
+        )
+        return [(r["name"], float(r["score"])) for r in cur]
+
+    def get_cluster(self, cluster_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT id, run_id, cluster_no, label_auto, label_user, size FROM clusters WHERE id=?",
+            (cluster_id,),
+        ).fetchone()
+        return dict(row) if row else None

@@ -167,5 +167,106 @@ def info(
         store.close()
 
 
+@app.command()
+def rename(
+    cluster_id: Annotated[int, typer.Argument(help="cluster.id (not cluster_no)")],
+    label: Annotated[
+        str | None,
+        typer.Argument(help="new user label; omit or pass '' to clear"),
+    ] = None,
+) -> None:
+    """Set or clear `label_user` on a cluster row."""
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        if store.get_cluster(cluster_id) is None:
+            typer.echo(f"cluster {cluster_id} not found", err=True)
+            raise typer.Exit(1)
+        with store.transaction():
+            store.set_cluster_label_user(cluster_id, label or None)
+        typer.echo(f"cluster {cluster_id} label_user={label!r}")
+    finally:
+        store.close()
+
+
+@app.command(name="rename-bulk")
+def rename_bulk(
+    json_path: Annotated[Path, typer.Argument(help="JSON map {cluster_id: label_user}")],
+) -> None:
+    """Bulk-rename clusters from a JSON file."""
+    import json as _json
+
+    mapping = _json.loads(json_path.read_text())
+    settings = load_settings()
+    store = Store(settings.db_path)
+    n = 0
+    try:
+        with store.transaction():
+            for k, v in mapping.items():
+                cid = int(k)
+                if store.get_cluster(cid) is None:
+                    typer.echo(f"  skip: cluster {cid} not found", err=True)
+                    continue
+                store.set_cluster_label_user(cid, v if v else None)
+                n += 1
+    finally:
+        store.close()
+    typer.echo(f"renamed {n}")
+
+
+@app.command(name="exif-backfill")
+def exif_backfill(
+    limit: Annotated[int | None, typer.Option(help="optional row cap")] = None,
+    force: Annotated[bool, typer.Option(help="re-extract even if exif_json already populated")] = False,
+) -> None:
+    """Walk DB rows, extract EXIF from disk, persist into images.exif_json."""
+    from .exif import extract_exif
+
+    settings = load_settings()
+    log = get_logger("phototag.exif")
+    store = Store(settings.db_path)
+    counts = {"total": 0, "updated": 0, "no_exif": 0, "failed": 0, "skipped": 0}
+    try:
+        rows = list(store.iter_images())
+        counts["total"] = len(rows)
+        if limit is not None:
+            rows = rows[:limit]
+        with store.transaction():
+            for r in rows:
+                if not force and store.get_image_exif(r.id):
+                    counts["skipped"] += 1
+                    continue
+                try:
+                    exif = extract_exif(Path(r.path))
+                except Exception as e:
+                    log.warning("exif_extract_failed", path=r.path, error=str(e))
+                    counts["failed"] += 1
+                    continue
+                if exif:
+                    store.update_image_exif(r.id, exif)
+                    counts["updated"] += 1
+                else:
+                    counts["no_exif"] += 1
+        log.info("exif_backfill_done", **counts)
+        typer.echo(json.dumps(counts, indent=2))
+    finally:
+        store.close()
+
+
+@app.command()
+def serve(
+    host: Annotated[str, typer.Option(help="bind address")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="port")] = 8000,
+) -> None:
+    """Start the FastAPI UI to browse clusters and rename them."""
+    import uvicorn
+
+    from .ui import create_app
+
+    settings = load_settings()
+    fapp = create_app(db_path=settings.db_path)
+    uvicorn.run(fapp, host=host, port=port, log_config=None, access_log=False)
+
+
 if __name__ == "__main__":
     app()

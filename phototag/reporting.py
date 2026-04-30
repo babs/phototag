@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .logging import get_logger
 from .store import Store
@@ -21,7 +21,9 @@ def _thumb_filename(path: str) -> str:
 def _make_thumb(src: Path, dst: Path) -> bool:
     try:
         with Image.open(src) as img:
-            rgb = img.convert("RGB")
+            # Bake EXIF Orientation into pixels — re-saved JPEG drops EXIF, so
+            # without this rotation the thumb is sideways for portrait phone shots.
+            rgb = ImageOps.exif_transpose(img).convert("RGB")
             rgb.thumbnail((THUMB_SIZE, THUMB_SIZE))
             rgb.save(dst, format="JPEG", quality=80)
         return True

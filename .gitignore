@@ -21,12 +21,10 @@ htmlcov/
 *.db-journal
 *.db-wal
 *.db-shm
-data/models/
-data/photo-corpus
-data/runs/
-data/sample/
-data/hf-cache/
-data/venv-gpu/
+# everything under data/ is generated/derived state (DBs, logs, model weights,
+# venvs, photo-corpus symlink, sample dirs, thumbnail caches, …); none of it
+# belongs in the repo.
+data/
 report*/
 
 # editor / agent state

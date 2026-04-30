@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<style>
+  :root {
+    --bg: #fafafa; --fg: #222; --muted: #666; --border: #e5e5e5;
+    --accent: #2c5fa3; --chip-bg: #eef3fb; --chip-fg: #2c5fa3;
+    --chip-active: #2c5fa3; --chip-active-fg: #fff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg);
+    display: grid; grid-template-rows: auto 1fr; height: 100vh;
+  }
+  header { padding: 8px 12px; border-bottom: 1px solid var(--border); background: #fff; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; font-weight: 600; }
+  header select, header input[type=number], header input[type=text] {
+    border: 1px solid var(--border); padding: 4px 6px; border-radius: 4px; font-size: 13px;
+  }
+  main {
+    display: grid; grid-template-columns: 320px 1fr; gap: 0; overflow: hidden;
+  }
+  aside { border-right: 1px solid var(--border); overflow-y: auto; background: #fff; }
+  aside .section { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  aside .section h3 { font-size: 11px; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; letter-spacing: 0.5px; }
+  .cluster-row {
+    padding: 6px 10px; cursor: pointer; border-bottom: 1px solid #f0f0f0;
+    display: flex; gap: 8px; justify-content: space-between; align-items: center;
+  }
+  .cluster-row:hover { background: #f4f7ff; }
+  .cluster-row.selected { background: var(--chip-bg); }
+  .cluster-row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cluster-row .user-label { font-weight: 600; color: var(--accent); }
+  .cluster-row .auto-label { color: var(--muted); font-size: 12px; }
+  .cluster-row .size { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  .cluster-row.noise { color: #999; }
+  section.workspace { overflow-y: auto; padding: 16px; }
+  .workspace h2 { margin: 0 0 4px; font-size: 18px; }
+  .workspace .auto { color: var(--muted); margin-bottom: 8px; }
+  .workspace .rename { margin: 8px 0 16px; display: flex; gap: 6px; }
+  .workspace .rename input { flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 14px; }
+  .workspace .rename button { padding: 6px 12px; border: 0; background: var(--accent); color: #fff; border-radius: 4px; cursor: pointer; }
+  .workspace .rename button:disabled { background: #aaa; }
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 16px; }
+  .tag {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--chip-bg); color: var(--chip-fg);
+    padding: 3px 8px; border-radius: 999px; font-size: 12px;
+    cursor: pointer; user-select: none;
+  }
+  .tag:hover { background: var(--chip-active); color: var(--chip-active-fg); }
+  .tag.active { background: var(--chip-active); color: var(--chip-active-fg); }
+  .tag .count { opacity: 0.7; font-size: 11px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+  .tile {
+    border: 1px solid var(--border); border-radius: 4px; overflow: hidden; background: #fff;
+    cursor: pointer; transition: transform 0.05s;
+  }
+  .tile:hover { transform: translateY(-1px); border-color: var(--accent); }
+  .tile img { width: 100%; height: 180px; object-fit: cover; display: block; background: #eee; }
+  .tile .meta { padding: 4px 6px; font-size: 11px; color: var(--muted); }
+  .tile .meta b { color: var(--accent); font-weight: 600; }
+  .empty { color: var(--muted); padding: 24px; text-align: center; }
+  .filters { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 12px; }
+  .filters .x { cursor: pointer; opacity: 0.6; }
+  .filters .x:hover { opacity: 1; }
+  details summary { cursor: pointer; padding: 4px 0; }
+  /* tag search dropdown */
+  .ts-wrap { position: relative; }
+  .ts-drop {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 50;
+    background: #fff; border: 1px solid var(--border); border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08); max-height: 320px; overflow-y: auto;
+    display: none; min-width: 220px;
+  }
+  .ts-drop.show { display: block; }
+  .ts-drop .row {
+    padding: 6px 10px; cursor: pointer; display: flex; gap: 8px;
+    justify-content: space-between; align-items: center; font-size: 13px;
+  }
+  .ts-drop .row:hover, .ts-drop .row.active { background: var(--chip-bg); }
+  .ts-drop .row.in-filter { color: var(--accent); font-weight: 600; }
+  .ts-drop .row .count { color: var(--muted); font-size: 11px; }
+  .ts-drop .empty { padding: 8px 10px; color: var(--muted); font-size: 12px; }
+  /* image lightbox */
+  .lightbox {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none;
+    align-items: center; justify-content: center; z-index: 100; padding: 20px;
+  }
+  .lightbox.show { display: flex; }
+  .lightbox img { max-width: 95vw; max-height: 80vh; }
+  .lightbox .info { position: absolute; left: 20px; right: 20px; bottom: 20px; color: #fff; font-size: 12px; max-height: 30vh; overflow-y: auto; background: rgba(0,0,0,0.5); padding: 8px; border-radius: 4px; }
+  .lightbox .close { position: absolute; top: 12px; right: 16px; color: #fff; font-size: 28px; cursor: pointer; user-select: none; }
+  .lightbox .nav {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    color: #fff; font-size: 48px; cursor: pointer; user-select: none;
+    padding: 16px 24px; opacity: 0.6; transition: opacity 0.1s;
+  }
+  .lightbox .nav:hover { opacity: 1; }
+  .lightbox .nav.prev { left: 8px; }
+  .lightbox .nav.next { right: 8px; }
+  .lightbox .counter {
+    position: absolute; top: 16px; left: 20px; color: #fff;
+    font-size: 12px; opacity: 0.6;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>phototag</h1>
+  <label>run <select id="run-select"></select></label>
+  <label style="margin-left:auto;">
+    score ≥ <input id="min-score" type="number" min="0" max="1" step="0.05" value="0.6" style="width:60px">
+  </label>
+  <span class="ts-wrap">
+    <input id="tag-input" type="text" placeholder="add tag…" autocomplete="off" style="width:200px">
+    <div id="tag-drop" class="ts-drop"></div>
+  </span>
+  <button id="clear-filters">clear</button>
+</header>
+<main>
+  <aside>
+    <div class="section">
+      <h3>filters</h3>
+      <div class="filters" id="active-tags"><span class="muted">none</span></div>
+    </div>
+    <div class="section">
+      <h3>top tags</h3>
+      <div class="tags" id="top-tags"></div>
+    </div>
+    <div class="section" style="padding:0;">
+      <h3 style="padding:8px 10px 4px;">clusters</h3>
+      <div id="cluster-list"></div>
+    </div>
+  </aside>
+  <section class="workspace" id="workspace">
+    <div class="empty">Pick a cluster on the left, or type a tag to search.</div>
+  </section>
+</main>
+<div class="lightbox" id="lightbox" onclick="if(event.target===this) closeLightbox()">
+  <span class="close" onclick="closeLightbox()">×</span>
+  <span class="counter" id="lightbox-counter"></span>
+  <span class="nav prev" onclick="navLightbox(-1)">‹</span>
+  <img id="lightbox-img" alt="">
+  <span class="nav next" onclick="navLightbox(1)">›</span>
+  <div class="info" id="lightbox-info"></div>
+</div>
+<script>
+const state = {
+  runs: [],
+  runId: null,
+  clusters: [],
+  selectedCluster: null,
+  activeTags: new Set(),
+  // current set of images in the workspace, used by the lightbox for navigation.
+  viewIds: [],
+  viewIndex: 0,
+};
+
+const $ = (id) => document.getElementById(id);
+const html = (s) => { const d = document.createElement('div'); d.innerHTML = s.trim(); return d.firstElementChild; };
+const escape = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+async function loadRuns() {
+  state.runs = await api('/api/runs');
+  const sel = $('run-select');
+  sel.innerHTML = '';
+  state.runs.forEach(r => {
+    const opt = document.createElement('option');
+    opt.value = r.id;
+    opt.textContent = `run ${r.id} — ${r.n_clusters}c · ${r.n_noise}n · ${r.total_images}img`;
+    sel.appendChild(opt);
+  });
+  if (!state.runs.length) return;
+  // Hash overrides default-latest-run.
+  const hashState = parseHash();
+  state.runId = hashState.run && state.runs.some(r => r.id === hashState.run)
+    ? hashState.run : state.runs[0].id;
+  sel.value = state.runId;
+  await loadClusters();
+  await loadTopTags();
+  await applyHashState(hashState);
+}
+
+async function loadClusters() {
+  state.clusters = await api(`/api/runs/${state.runId}/clusters`);
+  const root = $('cluster-list');
+  root.innerHTML = '';
+  state.clusters.forEach(c => {
+    const isNoise = c.cluster_no === -1;
+    const userLabel = c.label_user ? `<span class="user-label">${escape(c.label_user)}</span>` : '';
+    const autoLabel = c.label_auto ? `<span class="auto-label">${escape(c.label_auto)}</span>` : '';
+    const row = html(`<div class="cluster-row ${isNoise ? 'noise' : ''}" data-id="${c.id}">
+      <div class="label">${userLabel}${userLabel && autoLabel ? '<br>' : ''}${autoLabel}</div>
+      <div class="size">${c.size}</div>
+    </div>`);
+    row.onclick = () => selectCluster(c.id);
+    root.appendChild(row);
+  });
+}
+
+async function loadTopTags() {
+  const tags = await api('/api/tags?limit=30');
+  const root = $('top-tags');
+  root.innerHTML = '';
+  tags.forEach(t => {
+    const el = html(`<span class="tag" data-tag="${escape(t.name)}">${escape(t.name)} <span class="count">${t.count}</span></span>`);
+    el.onclick = () => toggleTag(t.name);
+    root.appendChild(el);
+  });
+}
+
+function selectCluster(id) {
+  state.selectedCluster = id;
+  document.querySelectorAll('.cluster-row').forEach(r => r.classList.toggle('selected', Number(r.dataset.id) === id));
+  showCluster(id);
+}
+
+async function showCluster(id) {
+  const ws = $('workspace');
+  ws.innerHTML = '<div class="empty">loading…</div>';
+  const c = await api(`/api/clusters/${id}?limit=120`);
+  ws.innerHTML = '';
+  ws.appendChild(html(`<h2>${c.label_user ? escape(c.label_user) : `cluster #${c.cluster_no}`}</h2>`));
+  if (c.label_auto) ws.appendChild(html(`<div class="auto">auto: ${escape(c.label_auto)} · size ${c.size}</div>`));
+  // rename
+  const renameDiv = html(`<div class="rename">
+    <input id="rename-input" type="text" placeholder="user label (blank to clear)" value="${escape(c.label_user || '')}">
+    <button id="rename-btn">save</button>
+  </div>`);
+  ws.appendChild(renameDiv);
+  $('rename-btn').onclick = async () => {
+    const v = $('rename-input').value.trim();
+    await api(`/api/clusters/${id}/rename`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ label_user: v || null })
+    });
+    await loadClusters();
+    await showCluster(id);
+  };
+  // top tags
+  if (c.top_tags?.length) {
+    const tagDiv = html('<div class="tags"></div>');
+    c.top_tags.forEach(t => {
+      const el = html(`<span class="tag ${state.activeTags.has(t.name) ? 'active' : ''}" data-tag="${escape(t.name)}">${escape(t.name)} <span class="count">${t.count}</span></span>`);
+      el.onclick = () => toggleTag(t.name);
+      tagDiv.appendChild(el);
+    });
+    ws.appendChild(tagDiv);
+  }
+  // members
+  const grid = html('<div class="grid"></div>');
+  if (!c.members.length) grid.appendChild(html('<div class="empty">empty cluster</div>'));
+  c.members.forEach(m => grid.appendChild(makeTile(m.image_id, m.path)));
+  ws.appendChild(grid);
+  state.viewIds = c.members.map(m => m.image_id);
+}
+
+function makeTile(image_id, path, score) {
+  const name = path.split('/').pop();
+  const scoreLabel = score != null ? `<b>${score.toFixed(2)}</b> · ` : '';
+  const tile = html(`<div class="tile" data-id="${image_id}">
+    <img loading="lazy" src="/thumb/${image_id}" alt="">
+    <div class="meta">${scoreLabel}${escape(name)}</div>
+  </div>`);
+  tile.onclick = () => openLightbox(image_id);
+  return tile;
+}
+
+function openLightbox(image_id) {
+  // Seed viewIds from the current grid if needed (e.g. user clicked outside any tracked view).
+  if (!state.viewIds.length) state.viewIds = [image_id];
+  let idx = state.viewIds.indexOf(image_id);
+  if (idx < 0) { state.viewIds = [image_id, ...state.viewIds]; idx = 0; }
+  state.viewIndex = idx;
+  $('lightbox').classList.add('show');
+  showCurrentLightbox();
+}
+
+let lightboxToken = 0;
+
+async function showCurrentLightbox() {
+  if (!state.viewIds.length) return;
+  const id = state.viewIds[state.viewIndex];
+  const myToken = ++lightboxToken;
+  const img = $('lightbox-img');
+  img.src = `/preview/${id}`;
+  img.dataset.imageId = id;
+  $('lightbox-counter').textContent = `${state.viewIndex + 1} / ${state.viewIds.length}`;
+  $('lightbox-info').innerHTML = '<div>loading…</div>';
+  preloadNeighbors(state.viewIndex);
+  const info = await api(`/api/images/${id}`);
+  if (myToken !== lightboxToken) return;  // user navigated again before fetch returned
+  const tagHtml = info.tags.map(t =>
+    `<span class="tag" onclick="toggleTag('${escape(t.name)}'); closeLightbox();">${escape(t.name)} <span class="count">${t.score.toFixed(2)}</span></span>`
+  ).join('');
+  $('lightbox-info').innerHTML = `<div>${escape(info.path)} · <a href="/raw/${id}" target="_blank" style="color:#9cf;">open original</a></div>${formatExif(info.exif)}<div class="tags" style="margin-top:6px;">${tagHtml}</div>`;
+}
+
+function formatExif(exif) {
+  if (!exif) return '';
+  const parts = [];
+  if (exif.datetime_original) parts.push(escape(exif.datetime_original.replace('T', ' ')));
+  const camera = [exif.make, exif.model].filter(Boolean).join(' ');
+  if (camera) parts.push(escape(camera));
+  if (exif.lens) parts.push(escape(exif.lens));
+  const expo = [];
+  if (exif.f_number) expo.push(`f/${Number(exif.f_number).toFixed(1)}`);
+  if (exif.exposure_time) {
+    const t = Number(exif.exposure_time);
+    expo.push(t >= 1 ? `${t.toFixed(1)}s` : `1/${Math.round(1/t)}s`);
+  }
+  if (exif.iso) expo.push(`ISO ${exif.iso}`);
+  if (exif.focal_length) expo.push(`${Number(exif.focal_length).toFixed(0)}mm`);
+  if (expo.length) parts.push(escape(expo.join(' · ')));
+  if (exif.gps) {
+    const { lat, lon } = exif.gps;
+    parts.push(
+      `<a href="https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}&zoom=15" target="_blank" style="color:#9cf;">${lat.toFixed(5)}, ${lon.toFixed(5)}</a>`
+    );
+  }
+  if (!parts.length) return '';
+  return `<div style="margin-top:4px;opacity:0.8;">${parts.join(' · ')}</div>`;
+}
+
+function preloadNeighbors(idx) {
+  // Pre-fetch a small window in both directions so ← / → feels instant.
+  const n = state.viewIds.length;
+  if (n <= 1) return;
+  for (const o of [1, -1, 2, -2]) {
+    const i = ((idx + o) % n + n) % n;
+    if (i === idx) continue;
+    const im = new Image();
+    im.src = `/preview/${state.viewIds[i]}`;
+  }
+}
+
+function navLightbox(delta) {
+  if (!state.viewIds.length) return;
+  const n = state.viewIds.length;
+  state.viewIndex = ((state.viewIndex + delta) % n + n) % n;
+  showCurrentLightbox();
+}
+
+function closeLightbox() { $('lightbox').classList.remove('show'); }
+
+function renderActiveFilters() {
+  const root = $('active-tags');
+  if (state.activeTags.size === 0) {
+    root.innerHTML = '<span style="color:var(--muted);">none</span>';
+    return;
+  }
+  root.innerHTML = '';
+  state.activeTags.forEach(t => {
+    const el = html(`<span class="tag active">${escape(t)} <span class="x" data-tag="${escape(t)}">×</span></span>`);
+    el.querySelector('.x').onclick = (e) => { e.stopPropagation(); toggleTag(t); };
+    root.appendChild(el);
+  });
+}
+
+async function toggleTag(name) {
+  if (state.activeTags.has(name)) state.activeTags.delete(name);
+  else state.activeTags.add(name);
+  renderActiveFilters();
+  if (state.activeTags.size > 0) await runSearch();
+  else if (state.selectedCluster) await showCluster(state.selectedCluster);
+}
+
+async function runSearch() {
+  const ws = $('workspace');
+  ws.innerHTML = '<div class="empty">searching…</div>';
+  const tags = Array.from(state.activeTags);
+  const minScore = parseFloat($('min-score').value || '0');
+  const params = new URLSearchParams();
+  tags.forEach(t => params.append('tag', t));
+  params.set('min_score', String(minScore));
+  params.set('limit', '200');
+  if (state.runId != null) params.set('run_id', String(state.runId));
+  const results = await api(`/api/search?${params.toString()}`);
+  ws.innerHTML = '';
+  ws.appendChild(html(`<h2>${tags.map(escape).join(' + ')}</h2>`));
+  ws.appendChild(html(`<div class="auto">${results.length} matches (score ≥ ${minScore.toFixed(2)})</div>`));
+  if (!results.length) {
+    ws.appendChild(html('<div class="empty">no matches</div>'));
+    return;
+  }
+  // Group by cluster
+  const groups = new Map();
+  results.forEach(r => {
+    const key = r.cluster_id ?? 'none';
+    if (!groups.has(key)) groups.set(key, { cluster: r, items: [] });
+    groups.get(key).items.push(r);
+  });
+  const flatIds = [];
+  for (const { cluster, items } of groups.values()) {
+    const lbl = cluster.label_user || cluster.label_auto || `cluster #${cluster.cluster_no ?? '?'}`;
+    ws.appendChild(html(`<details open><summary><b>${escape(lbl)}</b> · ${items.length}</summary></details>`));
+    const det = ws.lastElementChild;
+    const grid = html('<div class="grid" style="margin-top:8px;"></div>');
+    items.forEach(r => { grid.appendChild(makeTile(r.id, r.path, r.score)); flatIds.push(r.id); });
+    det.appendChild(grid);
+  }
+  state.viewIds = flatIds;
+}
+
+$('run-select').addEventListener('change', async (e) => {
+  state.runId = Number(e.target.value);
+  state.selectedCluster = null;
+  await loadClusters();
+  await loadTopTags();
+});
+$('min-score').addEventListener('change', () => { if (state.activeTags.size > 0) runSearch(); });
+$('clear-filters').addEventListener('click', () => {
+  state.activeTags.clear();
+  renderActiveFilters();
+  $('workspace').innerHTML = '<div class="empty">filters cleared</div>';
+});
+
+// Custom dropdown for tag search: shows on focus, filters as you type, click to add.
+const tagDropState = { items: [], active: -1 };
+let tagDebounce = null;
+
+async function refreshTagDropdown() {
+  const q = $('tag-input').value.trim();
+  const url = q.length
+    ? `/api/tags?prefix=${encodeURIComponent(q)}&limit=20`
+    : `/api/tags?limit=20`;
+  const items = await api(url);
+  tagDropState.items = items;
+  tagDropState.active = items.length ? 0 : -1;
+  renderTagDropdown();
+}
+
+function renderTagDropdown() {
+  const drop = $('tag-drop');
+  if (!tagDropState.items.length) {
+    drop.innerHTML = '<div class="empty">no matches</div>';
+    drop.classList.add('show');
+    return;
+  }
+  drop.innerHTML = tagDropState.items.map((t, i) => {
+    const cls = ['row'];
+    if (i === tagDropState.active) cls.push('active');
+    if (state.activeTags.has(t.name)) cls.push('in-filter');
+    return `<div class="${cls.join(' ')}" data-name="${escape(t.name)}">
+      <span>${escape(t.name)}</span><span class="count">${t.count}</span>
+    </div>`;
+  }).join('');
+  drop.classList.add('show');
+  drop.querySelectorAll('.row').forEach((row, i) => {
+    row.onmousedown = (e) => { e.preventDefault(); pickTag(tagDropState.items[i].name); };
+    row.onmouseenter = () => { tagDropState.active = i; updateActiveRow(); };
+  });
+}
+
+function updateActiveRow() {
+  document.querySelectorAll('#tag-drop .row').forEach((r, i) => {
+    r.classList.toggle('active', i === tagDropState.active);
+  });
+}
+
+function pickTag(name) {
+  toggleTag(name);
+  $('tag-input').value = '';
+  refreshTagDropdown();  // keep dropdown open showing latest set with new in-filter highlight
+}
+
+function hideTagDropdown() {
+  $('tag-drop').classList.remove('show');
+}
+
+$('tag-input').addEventListener('focus', () => refreshTagDropdown());
+$('tag-input').addEventListener('blur', () => setTimeout(hideTagDropdown, 120));
+$('tag-input').addEventListener('input', () => {
+  clearTimeout(tagDebounce);
+  tagDebounce = setTimeout(refreshTagDropdown, 120);
+});
+$('tag-input').addEventListener('keydown', (e) => {
+  if (!$('tag-drop').classList.contains('show')) return;
+  const max = tagDropState.items.length;
+  if (e.key === 'ArrowDown') { e.preventDefault(); tagDropState.active = (tagDropState.active + 1) % max; updateActiveRow(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); tagDropState.active = (tagDropState.active - 1 + max) % max; updateActiveRow(); }
+  else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (tagDropState.active >= 0) pickTag(tagDropState.items[tagDropState.active].name);
+    else if (e.target.value.trim()) pickTag(e.target.value.trim());
+  } else if (e.key === 'Escape') {
+    e.target.value = '';
+    hideTagDropdown();
+    e.target.blur();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  const open = $('lightbox').classList.contains('show');
+  if (!open) return;
+  if (e.key === 'Escape') closeLightbox();
+  else if (e.key === 'ArrowLeft' || e.key === 'PageUp' || e.key === 'k') { e.preventDefault(); navLightbox(-1); }
+  else if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === 'j' || e.key === ' ') { e.preventDefault(); navLightbox(1); }
+});
+
+// ---- URL hash sync (so refresh / share preserves view) ----------------------
+
+function parseHash() {
+  const raw = (location.hash || '').replace(/^#/, '');
+  const p = new URLSearchParams(raw);
+  return {
+    run: p.has('run') ? Number(p.get('run')) : null,
+    cluster: p.has('cluster') ? Number(p.get('cluster')) : null,
+    tags: p.getAll('tag'),
+    minScore: p.has('score') ? parseFloat(p.get('score')) : null,
+  };
+}
+
+let hashWriteSuspended = false;
+
+function writeHash() {
+  if (hashWriteSuspended) return;
+  const p = new URLSearchParams();
+  if (state.runId != null) p.set('run', String(state.runId));
+  // Tags take precedence in display: if filtering, persist tags+score; otherwise cluster.
+  if (state.activeTags.size > 0) {
+    state.activeTags.forEach(t => p.append('tag', t));
+    const ms = parseFloat($('min-score').value || '0');
+    if (ms > 0) p.set('score', ms.toFixed(2));
+  } else if (state.selectedCluster != null) {
+    p.set('cluster', String(state.selectedCluster));
+  }
+  const next = '#' + p.toString();
+  if (location.hash !== next) history.replaceState(null, '', next || location.pathname);
+}
+
+async function applyHashState(h) {
+  hashWriteSuspended = true;
+  try {
+    if (h.minScore != null && !Number.isNaN(h.minScore)) $('min-score').value = String(h.minScore);
+    if (h.tags && h.tags.length) {
+      state.activeTags = new Set(h.tags);
+      renderActiveFilters();
+      await runSearch();
+    } else if (h.cluster != null) {
+      // Cluster row may not exist for the chosen run; fall back to no selection.
+      const exists = state.clusters.some(c => c.id === h.cluster);
+      if (exists) selectCluster(h.cluster);
+    }
+  } finally {
+    hashWriteSuspended = false;
+  }
+}
+
+window.addEventListener('hashchange', async () => {
+  const h = parseHash();
+  // Switch run if the hash points elsewhere.
+  if (h.run != null && h.run !== state.runId && state.runs.some(r => r.id === h.run)) {
+    state.runId = h.run;
+    $('run-select').value = h.run;
+    await loadClusters();
+    await loadTopTags();
+  }
+  // Reset filters/cluster then re-apply.
+  state.activeTags.clear();
+  state.selectedCluster = null;
+  document.querySelectorAll('.cluster-row').forEach(r => r.classList.remove('selected'));
+  renderActiveFilters();
+  await applyHashState(h);
+});
+
+// Wrap state-mutating functions so the hash always reflects the visible state.
+const _origSelectCluster = selectCluster;
+selectCluster = (id) => { _origSelectCluster(id); writeHash(); };
+const _origToggleTag = toggleTag;
+toggleTag = async (name) => { await _origToggleTag(name); writeHash(); };
+$('clear-filters').addEventListener('click', writeHash);
+$('min-score').addEventListener('change', writeHash);
+$('run-select').addEventListener('change', writeHash);
+
+renderActiveFilters();
+loadRuns();
+</script>
+</body>
+</html>
