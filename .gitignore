@@ -27,4 +27,7 @@ data/runs/
 data/sample/
 data/hf-cache/
 data/venv-gpu/
-report/
+report*/
+
+# editor / agent state
+.claude/

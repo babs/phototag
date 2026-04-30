@@ -1,16 +1,21 @@
+import queue
+import threading
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from PIL import Image
 
 from .logging import get_logger
+from .models.base import Embedder, Tagger
 from .scanner import ScannedFile, hash_file, iter_images
 from .store import Store
 
-if TYPE_CHECKING:
-    from .models.base import Embedder, Tagger
+# Sentinel value pushed onto the prefetch queue to signal end-of-stream.
+_END = object()
+# Prepared item: (file, hash_or_none, image_or_none).
+PreparedItem = tuple[ScannedFile, str | None, Image.Image | None]
 
 log = get_logger(__name__)
 
@@ -40,6 +45,50 @@ def _batched(it: Iterable[ScannedFile], n: int) -> Iterator[list[ScannedFile]]:
         yield chunk
 
 
+def _decode_one(sf: ScannedFile) -> PreparedItem:
+    """Hash + decode a single file. Returns (sf, hash, img) or (sf, hash, None) on failure."""
+    h = hash_file(sf.path)
+    img = _open_image(sf.path)
+    return sf, h, img
+
+
+def _prefetch_decoded_batches(
+    files: list[ScannedFile],
+    batch_size: int,
+    *,
+    workers: int,
+    queue_depth: int = 2,
+) -> Iterator[list[PreparedItem]]:
+    """Decode batches in worker threads, hand them off via a bounded queue.
+
+    Why: the GPU is idle while the next batch is being read+decoded. Prefetching
+    overlaps CPU decode with GPU forward and roughly doubles throughput on this
+    hardware (980 Ti, swin_l), as observed by ~50% GPU duty cycle without it.
+    """
+    if not files:
+        return
+    q: queue.Queue[list[PreparedItem] | object] = queue.Queue(maxsize=queue_depth)
+
+    def producer() -> None:
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for batch_files in _batched(iter(files), batch_size):
+                    q.put(list(ex.map(_decode_one, batch_files)))
+        finally:
+            q.put(_END)
+
+    t = threading.Thread(target=producer, daemon=True)
+    t.start()
+    try:
+        while True:
+            item = q.get()
+            if item is _END:
+                return
+            yield item  # type: ignore[misc]
+    finally:
+        t.join(timeout=5.0)
+
+
 def scan_and_tag(
     root: Path,
     store: Store,
@@ -48,24 +97,40 @@ def scan_and_tag(
     batch_size: int = 16,
     force: bool = False,
     force_tag: bool = False,
+    decode_workers: int | None = None,
 ) -> dict[str, int]:
-    """Scan + hash + tag. Idempotent on (path, hash, mtime)."""
+    """Scan + hash + tag. Idempotent on (path, hash, mtime).
+
+    Decoding+hashing runs in a background thread pool so the GPU stays busy.
+    """
     counts = {"scanned": 0, "skipped": 0, "tagged": 0, "failed": 0}
     files = list(iter_images(root))
     counts["scanned"] = len(files)
     log.info("scan_started", root=str(root), found=len(files))
 
-    for batch in _batched(iter(files), batch_size):
+    # Cheap pass: drop files unchanged-by-mtime so we don't even decode them.
+    if force or force_tag:
+        to_decode = files
+    else:
+        to_decode = []
+        for sf in files:
+            existing = store.get_image_by_path(str(sf.path))
+            if existing is not None and existing.mtime == sf.mtime:
+                counts["skipped"] += 1
+            else:
+                to_decode.append(sf)
+    log.info("scan_filter", to_decode=len(to_decode), skipped=counts["skipped"])
+
+    workers = decode_workers if decode_workers is not None else max(2, batch_size)
+    for batch in _prefetch_decoded_batches(to_decode, batch_size, workers=workers):
         to_infer: list[tuple[int, Image.Image]] = []
         with store.transaction():
-            for sf in batch:
+            for sf, content_hash, img in batch:
+                if img is None or content_hash is None:
+                    counts["failed"] += 1
+                    continue
                 spath = str(sf.path)
                 existing = store.get_image_by_path(spath)
-                unchanged = existing is not None and existing.mtime == sf.mtime and not (force or force_tag)
-                if unchanged:
-                    counts["skipped"] += 1
-                    continue
-                content_hash = hash_file(sf.path)
                 if (
                     existing is not None
                     and existing.hash == content_hash
@@ -73,10 +138,6 @@ def scan_and_tag(
                     and not (force or force_tag)
                 ):
                     counts["skipped"] += 1
-                    continue
-                img = _open_image(sf.path)
-                if img is None:
-                    counts["failed"] += 1
                     continue
                 w, h = img.size
                 image_id = store.upsert_image(
@@ -115,37 +176,64 @@ def embed_all(
     *,
     batch_size: int = 32,
     force: bool = False,
+    decode_workers: int | None = None,
 ) -> dict[str, int]:
-    """Compute CLIP embeddings for all images that don't have them yet."""
+    """Compute CLIP embeddings for all images that don't have them yet.
+
+    Decoding runs in worker threads to keep the GPU busy.
+    """
     counts = {"total": 0, "embedded": 0, "skipped": 0, "failed": 0}
     images = list(store.iter_images())
     counts["total"] = len(images)
     log.info("embed_started", total=len(images), model=embedder.name)
 
-    for chunk_start in range(0, len(images), batch_size):
-        chunk = images[chunk_start : chunk_start + batch_size]
-        loaded: list[tuple[int, Image.Image]] = []
-        for row in chunk:
-            if not force and store.has_embedding(row.id, embedder.name):
-                counts["skipped"] += 1
-                continue
-            img = _open_image(Path(row.path))
-            if img is None:
-                counts["failed"] += 1
-                continue
-            loaded.append((row.id, img))
+    todo = []
+    for row in images:
+        if not force and store.has_embedding(row.id, embedder.name):
+            counts["skipped"] += 1
+            continue
+        todo.append(row)
 
-        if not loaded:
-            continue
+    workers = decode_workers if decode_workers is not None else max(2, batch_size // 2)
+    q: queue.Queue[list[tuple[int, Image.Image | None]] | object] = queue.Queue(maxsize=2)
+
+    def producer() -> None:
         try:
-            vecs = embedder.embed_images([img for _, img in loaded])
-        except Exception as e:
-            log.error("embed_batch_failed", error=str(e), n=len(loaded))
-            counts["failed"] += len(loaded)
-            continue
-        with store.transaction():
-            for (image_id, _img), vec in zip(loaded, vecs, strict=True):
-                store.upsert_embedding(image_id, embedder.name, vec)
-                counts["embedded"] += 1
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for chunk_start in range(0, len(todo), batch_size):
+                    chunk = todo[chunk_start : chunk_start + batch_size]
+                    decoded = list(ex.map(lambda r: (r.id, _open_image(Path(r.path))), chunk))
+                    q.put(decoded)
+        finally:
+            q.put(_END)
+
+    t = threading.Thread(target=producer, daemon=True)
+    t.start()
+    try:
+        while True:
+            item = q.get()
+            if item is _END:
+                break
+            assert isinstance(item, list)
+            loaded: list[tuple[int, Image.Image]] = []
+            for image_id, img in item:
+                if img is None:
+                    counts["failed"] += 1
+                else:
+                    loaded.append((image_id, img))
+            if not loaded:
+                continue
+            try:
+                vecs = embedder.embed_images([img for _, img in loaded])
+            except Exception as e:
+                log.error("embed_batch_failed", error=str(e), n=len(loaded))
+                counts["failed"] += len(loaded)
+                continue
+            with store.transaction():
+                for (image_id, _img), vec in zip(loaded, vecs, strict=True):
+                    store.upsert_embedding(image_id, embedder.name, vec)
+                    counts["embedded"] += 1
+    finally:
+        t.join(timeout=5.0)
     log.info("embed_completed", **counts)
     return counts
