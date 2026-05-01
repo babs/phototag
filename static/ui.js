@@ -4,6 +4,7 @@ const state = {
   clusters: [],
   selectedCluster: null,
   selectedFaceCluster: null,
+  selectedPersonName: null,
   activeTags: new Set(),
   activePersons: new Set(),
   lightboxOpen: false,
@@ -381,7 +382,9 @@ async function saveFaceName() {
 $('face-name-save').onclick = saveFaceName;
 $('face-name-cancel').onclick = closeFaceNameForm;
 $('face-view-person').onclick = () => {
-  if (pendingFace?.cluster_id != null) viewPerson(pendingFace.cluster_id);
+  if (pendingFace?.cluster_id != null) {
+    viewPerson(pendingFace.cluster_id, pendingFace.named ? pendingFace.label : null);
+  }
   closeFaceNameForm();
 };
 $('face-wrong').onclick = async () => {
@@ -431,13 +434,24 @@ async function redetectFaces(imageId) {
   showCurrentLightbox();
 }
 
-async function viewPerson(clusterId) {
+async function viewPerson(clusterId, name) {
   // Pull all photos containing that person; replace the current view with them.
-  const data = await api(`/api/people/${clusterId}?limit=500`);
-  const ids = [];
+  // If `name` is supplied, walk every cluster sharing the same label_user so
+  // the lightbox includes age-band siblings too.
+  let ids = [];
   const seen = new Set();
-  for (const m of data.members) {
-    if (!seen.has(m.image_id)) { seen.add(m.image_id); ids.push(m.image_id); }
+  if (name) {
+    const data = await api(`/api/people/by-name/${encodeURIComponent(name)}?limit=500`);
+    for (const grp of data.groups) {
+      for (const m of grp.members) {
+        if (!seen.has(m.image_id)) { seen.add(m.image_id); ids.push(m.image_id); }
+      }
+    }
+  } else {
+    const data = await api(`/api/people/${clusterId}?limit=500`);
+    for (const m of data.members) {
+      if (!seen.has(m.image_id)) { seen.add(m.image_id); ids.push(m.image_id); }
+    }
   }
   if (!ids.length) return;
   state.viewIds = ids;
@@ -664,6 +678,7 @@ function parseHash() {
     run: p.has('run') ? Number(p.get('run')) : null,
     cluster: p.has('cluster') ? Number(p.get('cluster')) : null,
     face: p.has('face') ? Number(p.get('face')) : null,
+    who: p.get('who'),
     tags: p.getAll('tag'),
     persons: p.getAll('person'),
     minScore: p.has('score') ? parseFloat(p.get('score')) : null,
@@ -684,6 +699,8 @@ function writeHash() {
     state.activeTags.forEach(t => p.append('tag', t));
     const ms = parseFloat($('min-score').value || '0');
     if (ms > 0 && state.activeTags.size > 0) p.set('score', ms.toFixed(2));
+  } else if (state.view === 'faces' && state.selectedPersonName != null) {
+    p.set('who', state.selectedPersonName);
   } else if (state.view === 'faces' && state.selectedFaceCluster != null) {
     p.set('face', String(state.selectedFaceCluster));
   } else if (state.selectedCluster != null) {
@@ -713,12 +730,18 @@ async function applyHashState(h) {
       state.activePersons = new Set(h.persons || []);
       renderActiveFilters();
       await runSearch();
+    } else if (h.who) {
+      state.view = 'faces';
+      document.querySelectorAll('.view-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.view === 'faces');
+      });
+      if ($('cluster-pane-title').textContent !== 'people') await showFacesPanel();
+      await showPersonByName(h.who);
     } else if (h.face != null) {
       state.view = 'faces';
       document.querySelectorAll('.view-btn').forEach(b => {
         b.classList.toggle('active', b.dataset.view === 'faces');
       });
-      // Ensure people sidebar is rendered before selecting.
       if ($('cluster-pane-title').textContent !== 'people') await showFacesPanel();
       await showPersonInWorkspace(h.face);
     } else if (h.cluster != null) {
@@ -802,24 +825,38 @@ function renderClusters() {
 }
 
 async function showFacesPanel() {
-  // Sidebar list: face clusters (people) if any; otherwise just an empty message.
+  // Sidebar list: deduplicated by label_user — one row per name even if the
+  // person spans several underlying face_clusters. Unnamed clusters keep their
+  // own per-cluster rows (each is its own "person N").
   $('cluster-pane-title').textContent = 'people';
   const root = $('cluster-list');
   root.innerHTML = '<div class="empty" style="padding:12px;">loading…</div>';
-  let people = [];
-  try { people = await api('/api/people'); } catch (e) { people = []; }
+  let named = [];
+  let unnamed = [];
+  try {
+    [named, unnamed] = await Promise.all([
+      api('/api/people/names?limit=500'),
+      api('/api/people?only_unnamed=true').catch(() => []),
+    ]);
+  } catch (e) { /* faces feature absent */ }
   root.innerHTML = '';
-  if (!people.length) {
+  if (!named.length && !unnamed.length) {
     root.appendChild(html(`<div class="empty" style="padding:12px;font-size:12px;">
       no face clusters yet. run <code>phototag faces cluster</code> after detection.
     </div>`));
   } else {
-    people.forEach(p => {
-      const lbl = p.name
-        ? `<span class="user-label">${escape(p.name)}</span>`
-        : `<span class="auto-label">${escape(p.auto || `person ${p.cluster_no}`)}</span>`;
+    named.forEach(p => {
+      const cBadge = p.n_clusters > 1 ? ` <span class="count" style="opacity:0.7;">×${p.n_clusters}</span>` : '';
+      const row = html(`<div class="cluster-row" data-name="${escape(p.name)}">
+        <div class="label"><span class="user-label">${escape(p.name)}</span>${cBadge}</div>
+        <div class="size">${p.count}</div>
+      </div>`);
+      row.onclick = () => showPersonByName(p.name);
+      root.appendChild(row);
+    });
+    unnamed.forEach(p => {
       const row = html(`<div class="cluster-row" data-id="${p.cluster_id}">
-        <div class="label">${lbl}</div>
+        <div class="label"><span class="auto-label">${escape(p.auto || `person ${p.cluster_no}`)}</span></div>
         <div class="size">${p.size}</div>
       </div>`);
       row.onclick = () => showPersonInWorkspace(p.cluster_id);
@@ -855,34 +892,30 @@ async function showFacesGrid() {
 
 async function showPersonInWorkspace(clusterId) {
   state.selectedFaceCluster = clusterId;
+  state.selectedPersonName = null;
   writeHash();
   const ws = $('workspace');
   ws.innerHTML = '<div class="empty">loading…</div>';
   const data = await api(`/api/people/${clusterId}?limit=500`);
   const seen = new Set(); const ids = [];
   for (const m of data.members) if (!seen.has(m.image_id)) { seen.add(m.image_id); ids.push(m.image_id); }
-  // Find sibling clusters sharing this label_user (if any).
-  let siblings = [];
-  if (data.label_user) {
-    siblings = await api(`/api/people/by-name/${encodeURIComponent(data.label_user)}/clusters`)
-      .catch(() => []);
-  }
   ws.innerHTML = '';
   const titleText = data.label_user || data.label_auto || `person ${data.cluster_no}`;
-  const titleSuffix = siblings.length > 1 ? ` <span style="font-size:12px;color:var(--muted);">(${siblings.length} clusters share this name)</span>` : '';
-  ws.appendChild(html(`<h2>${escape(titleText)} <button id="person-edit-toggle" class="pen-btn" title="edit name">✏️</button>${titleSuffix}</h2>`));
+  ws.appendChild(html(`<h2>${escape(titleText)} <button id="person-edit-toggle" class="pen-btn" title="edit name">✏️</button></h2>`));
 
-  // Inline rename for *this cluster only* — hidden until pen is clicked.
-  const renameDiv = html(`<div class="rename" id="person-rename" style="margin:6px 0 8px; display:none;">
-    <input id="person-rename-input" type="text" placeholder="rename this cluster…" value="${escape(data.label_user || '')}">
-    <button id="person-rename-save">save</button>
-    <button id="person-rename-clear" title="unname this cluster">clear</button>
+  // Edit-only block: rename this cluster (hidden until pen is clicked).
+  const editDiv = html(`<div id="person-edit" style="display:none; margin:6px 0 12px; padding:8px; background:#fff7ed; border-radius:4px;">
+    <div class="rename">
+      <input id="person-rename-input" type="text" placeholder="rename this cluster…" value="${escape(data.label_user || '')}">
+      <button id="person-rename-save">save</button>
+      <button id="person-rename-clear" title="unname this cluster">clear</button>
+    </div>
   </div>`);
-  ws.appendChild(renameDiv);
+  ws.appendChild(editDiv);
   $('person-edit-toggle').onclick = () => {
-    const r = $('person-rename');
-    r.style.display = r.style.display === 'none' ? 'flex' : 'none';
-    if (r.style.display === 'flex') $('person-rename-input').focus();
+    const r = $('person-edit');
+    r.style.display = r.style.display === 'none' ? 'block' : 'none';
+    if (r.style.display === 'block') $('person-rename-input').focus();
   };
   $('person-rename-save').onclick = () => savePersonRename(clusterId, $('person-rename-input').value.trim());
   $('person-rename-clear').onclick = () => savePersonRename(clusterId, '');
@@ -890,27 +923,70 @@ async function showPersonInWorkspace(clusterId) {
     if (e.key === 'Enter') { e.preventDefault(); savePersonRename(clusterId, e.target.value.trim()); }
   });
 
-  // Group operations: only meaningful when 2+ clusters share the name.
-  if (siblings.length > 1 && data.label_user) {
-    const grpDiv = html(`<div class="rename" style="margin-bottom:12px; padding:6px 8px; background:#fff7ed; border-radius:4px;">
-      <span style="font-size:12px;">all <b>${siblings.length}</b> clusters of "${escape(data.label_user)}":</span>
-      <input id="group-rename-input" type="text" placeholder="rename all to…" style="flex:1;">
-      <button id="group-rename-save">rename all</button>
-      <button id="group-split">split into ${siblings.length}</button>
-    </div>`);
-    ws.appendChild(grpDiv);
-    $('group-rename-save').onclick = () => groupRename(data.label_user, $('group-rename-input').value.trim());
-    $('group-split').onclick = () => groupSplit(data.label_user);
-    $('group-rename-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); groupRename(data.label_user, e.target.value.trim()); }
-    });
-  }
-
   ws.appendChild(html(`<div class="auto">${ids.length} photos · ${data.size} faces in cluster ${data.cluster_no}</div>`));
   const grid = html('<div class="grid"></div>');
   ids.forEach(id => grid.appendChild(makeTile(id, `image-${id}`, null)));
   ws.appendChild(grid);
   state.viewIds = ids;
+}
+
+async function showPersonByName(name) {
+  state.selectedPersonName = name;
+  state.selectedFaceCluster = null;
+  writeHash();
+  const ws = $('workspace');
+  ws.innerHTML = '<div class="empty">loading…</div>';
+  const data = await api(`/api/people/by-name/${encodeURIComponent(name)}?limit=500`);
+  ws.innerHTML = '';
+  const cBadge = data.n_clusters > 1
+    ? ` <span style="font-size:12px;color:var(--muted);">(${data.n_clusters} clusters)</span>`
+    : '';
+  ws.appendChild(html(`<h2>👤 ${escape(name)} <button id="person-edit-toggle" class="pen-btn" title="edit">✏️</button>${cBadge}</h2>`));
+  ws.appendChild(html(`<div class="auto">${data.n_photos} photos${data.n_clusters > 1 ? ` across ${data.n_clusters} clusters` : ''}</div>`));
+
+  // Edit block (hidden by default): rename-all + split + clear.
+  const editBlock = html(`<div id="person-edit" style="display:none; margin:8px 0 12px; padding:8px; background:#fff7ed; border-radius:4px;">
+    <div class="rename" style="margin-bottom:6px;">
+      <input id="group-rename-input" type="text" placeholder="rename all clusters of '${escape(name)}' to…" style="flex:1;">
+      <button id="group-rename-save">rename all</button>
+      <button id="group-clear" title="unname every cluster of this person">clear</button>
+    </div>
+    ${data.n_clusters > 1 ? `<div style="margin-top:4px;">
+      <button id="group-split">split into ${data.n_clusters} (${escape(name)} 1, ${escape(name)} 2…)</button>
+    </div>` : ''}
+  </div>`);
+  ws.appendChild(editBlock);
+  $('person-edit-toggle').onclick = () => {
+    const r = $('person-edit');
+    r.style.display = r.style.display === 'none' ? 'block' : 'none';
+    if (r.style.display === 'block') $('group-rename-input').focus();
+  };
+  $('group-rename-save').onclick = () => groupRename(name, $('group-rename-input').value.trim());
+  $('group-clear').onclick = () => {
+    if (confirm(`Clear name "${name}" from all its clusters?`)) groupRename(name, '');
+  };
+  $('group-rename-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); groupRename(name, e.target.value.trim()); }
+  });
+  if ($('group-split')) $('group-split').onclick = () => groupSplit(name);
+
+  // Workspace grid: photos grouped by underlying cluster, one section per cluster.
+  const allIds = [];
+  for (const grp of data.groups) {
+    const seen = new Set();
+    const ids = [];
+    for (const m of grp.members) {
+      if (!seen.has(m.image_id)) { seen.add(m.image_id); ids.push(m.image_id); allIds.push(m.image_id); }
+    }
+    const header = html(`<h3 style="margin:18px 0 4px; font-size:14px;">
+      cluster #${grp.cluster_no} <span style="color:var(--muted);font-weight:400;">· ${ids.length} photos · ${grp.size} faces</span>
+    </h3>`);
+    ws.appendChild(header);
+    const grid = html('<div class="grid"></div>');
+    ids.forEach(id => grid.appendChild(makeTile(id, `image-${id}`, null)));
+    ws.appendChild(grid);
+  }
+  state.viewIds = allIds;
 }
 
 async function savePersonRename(clusterId, name) {

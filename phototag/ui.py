@@ -468,6 +468,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     def api_people(
         run_id: int | None = None,
         only_named: bool = False,
+        only_unnamed: bool = False,
     ) -> list[dict[str, Any]]:
         s = _store(app)
         rid = run_id if run_id is not None else s.latest_face_run()
@@ -479,6 +480,8 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             if c["cluster_no"] == -1:
                 continue
             if only_named and not c["label_user"]:
+                continue
+            if only_unnamed and c["label_user"]:
                 continue
             members = s.face_cluster_members(c["id"], limit=3)
             out.append(
@@ -493,6 +496,34 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 }
             )
         return out
+
+    @app.get("/api/people/by-name/{name}")
+    def api_person_by_name(
+        name: str,
+        limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    ) -> dict[str, Any]:
+        """Merged person view: every face_cluster sharing this label_user.
+
+        Returns the underlying clusters (each with up to `limit` members),
+        plus aggregate counts for the header.
+        """
+        s = _store(app)
+        clusters = s.list_clusters_by_label(name)
+        if not clusters:
+            raise HTTPException(status_code=404, detail="no clusters with this name")
+        groups: list[dict[str, Any]] = []
+        seen_images: set[int] = set()
+        for c in clusters:
+            members = s.face_cluster_members(int(c["id"]), limit=limit)
+            for m in members:
+                seen_images.add(int(m["image_id"]))
+            groups.append({**c, "color": _face_color(int(c["id"])), "members": members})
+        return {
+            "name": name,
+            "n_clusters": len(clusters),
+            "n_photos": len(seen_images),
+            "groups": groups,
+        }
 
     @app.get("/api/people/{cluster_id}")
     def api_person(
