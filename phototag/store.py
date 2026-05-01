@@ -665,12 +665,18 @@ class Store:
         row = self.conn.execute("SELECT id FROM face_runs ORDER BY id DESC LIMIT 1").fetchone()
         return int(row["id"]) if row else None
 
-    def list_named_people(self, *, prefix: str | None = None, limit: int = 50) -> list[tuple[str, int]]:
-        """All named-people across all face_runs, with photo count (deduped per image)."""
+    def list_named_people(self, *, prefix: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        """All named-people across face_runs.
+
+        Each entry: {name, count (distinct images), n_clusters (face_clusters
+        sharing that label_user)}.
+        """
         if prefix:
             cur = self.conn.execute(
                 """
-                SELECT fc.label_user AS name, COUNT(DISTINCT f.image_id) AS n
+                SELECT fc.label_user AS name,
+                       COUNT(DISTINCT f.image_id) AS n,
+                       COUNT(DISTINCT fc.id) AS n_clusters
                 FROM face_clusters fc
                 JOIN face_cluster_assignments fca ON fca.cluster_id = fc.id
                 JOIN faces f ON f.id = fca.face_id
@@ -682,7 +688,9 @@ class Store:
         else:
             cur = self.conn.execute(
                 """
-                SELECT fc.label_user AS name, COUNT(DISTINCT f.image_id) AS n
+                SELECT fc.label_user AS name,
+                       COUNT(DISTINCT f.image_id) AS n,
+                       COUNT(DISTINCT fc.id) AS n_clusters
                 FROM face_clusters fc
                 JOIN face_cluster_assignments fca ON fca.cluster_id = fc.id
                 JOIN faces f ON f.id = fca.face_id
@@ -691,7 +699,47 @@ class Store:
                 """,
                 (limit,),
             )
-        return [(r["name"], int(r["n"])) for r in cur]
+        return [
+            {
+                "name": r["name"],
+                "count": int(r["n"]),
+                "n_clusters": int(r["n_clusters"]),
+            }
+            for r in cur
+        ]
+
+    def list_clusters_by_label(self, label: str) -> list[dict[str, Any]]:
+        cur = self.conn.execute(
+            "SELECT id, run_id, cluster_no, size, label_user, label_auto "
+            "FROM face_clusters WHERE label_user=? ORDER BY size DESC",
+            (label,),
+        )
+        return [dict(r) for r in cur]
+
+    def rename_clusters_by_label(self, old: str, new: str | None) -> int:
+        cur = self.conn.execute(
+            "UPDATE face_clusters SET label_user=? WHERE label_user=?",
+            (new, old),
+        )
+        return int(cur.rowcount)
+
+    def cluster_centroid(self, cluster_id: int) -> np.ndarray | None:
+        cur = self.conn.execute(
+            """
+            SELECT f.dim, f.embedding
+            FROM face_cluster_assignments fca
+            JOIN faces f ON f.id = fca.face_id
+            WHERE fca.cluster_id = ?
+            """,
+            (cluster_id,),
+        )
+        vecs = [np.frombuffer(row["embedding"], dtype=np.float32, count=int(row["dim"])) for row in cur]
+        if not vecs:
+            return None
+        return np.mean(np.vstack(vecs), axis=0).astype(np.float32)
+
+    def delete_face_identity(self, name: str) -> None:
+        self.conn.execute("DELETE FROM face_identities WHERE name=?", (name,))
 
     def search_images_by_persons(self, names: list[str]) -> set[int]:
         """Image ids containing a face in a cluster named for each of `names` (AND)."""

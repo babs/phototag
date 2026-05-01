@@ -188,7 +188,76 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         prefix: str | None = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 30,
     ) -> list[dict[str, Any]]:
-        return [{"name": n, "count": c} for n, c in _store(app).list_named_people(prefix=prefix, limit=limit)]
+        return _store(app).list_named_people(prefix=prefix, limit=limit)
+
+    @app.get("/api/people/by-name/{name}/clusters")
+    def api_people_by_name_clusters(name: str) -> list[dict[str, Any]]:
+        return _store(app).list_clusters_by_label(name)
+
+    @app.post("/api/people/by-name/{name}/rename")
+    def api_people_by_name_rename(name: str, body: FaceNameRequest) -> dict[str, Any]:
+        """Rename every cluster currently labelled `name` to `body.name`.
+
+        face_identities is keyed by name: we move the row (or merge into the
+        target identity if it exists). Pass an empty/null name to clear all.
+        """
+        s = _store(app)
+        new = (body.name or "").strip() or None
+        if new == name:
+            return {"renamed": 0, "from": name, "to": new}
+        with s.transaction():
+            n = s.rename_clusters_by_label(name, new)
+            old_id = next((i for i in s.list_face_identities() if i["name"] == name), None)
+            if old_id is not None:
+                if new:
+                    new_id = next(
+                        (i for i in s.list_face_identities() if i["name"] == new),
+                        None,
+                    )
+                    if new_id is not None:
+                        n_old = old_id["n_samples"]
+                        n_new = new_id["n_samples"]
+                        blended = (new_id["centroid"] * n_new + old_id["centroid"] * n_old) / max(
+                            1, n_new + n_old
+                        )
+                        s.upsert_face_identity(
+                            new,
+                            blended.astype(np.float32, copy=False),
+                            n_samples=n_new + n_old,
+                        )
+                    else:
+                        s.upsert_face_identity(
+                            new,
+                            old_id["centroid"].astype(np.float32, copy=False),
+                            n_samples=old_id["n_samples"],
+                        )
+                s.delete_face_identity(name)
+        log.info("face_identity_rename_all", from_=name, to=new, clusters=n)
+        return {"renamed": n, "from": name, "to": new}
+
+    @app.post("/api/people/by-name/{name}/split")
+    def api_people_by_name_split(name: str) -> dict[str, Any]:
+        """Suffix each cluster currently labelled `name` as `name 1`, `name 2`, …
+
+        Replaces the single shared identity with one per split (each cluster's
+        own centroid). Re-group later by renaming them back to the same name.
+        """
+        s = _store(app)
+        clusters = s.list_clusters_by_label(name)
+        if not clusters:
+            raise HTTPException(status_code=404, detail="no clusters with this name")
+        with s.transaction():
+            new_names: list[str] = []
+            for i, c in enumerate(clusters, start=1):
+                new_name = f"{name} {i}"
+                s.set_face_cluster_label_user(int(c["id"]), new_name)
+                centroid = s.cluster_centroid(int(c["id"]))
+                if centroid is not None:
+                    s.upsert_face_identity(new_name, centroid, n_samples=int(c["size"]))
+                new_names.append(new_name)
+            s.delete_face_identity(name)
+        log.info("face_identity_split", name=name, into=new_names)
+        return {"split": len(clusters), "from": name, "into": new_names}
 
     @app.get("/api/images/{image_id}")
     def api_image(image_id: int) -> dict[str, Any]:

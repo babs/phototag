@@ -680,7 +680,7 @@ async function refreshTagDropdown() {
   ]);
   // Combine: people first when q is set (more specific), tags first otherwise.
   const items = [
-    ...people.map(p => ({ kind: 'person', name: p.name, count: p.count })),
+    ...people.map(p => ({ kind: 'person', name: p.name, count: p.count, n_clusters: p.n_clusters })),
     ...tags.map(t => ({ kind: 'tag', name: t.name, count: t.count })),
   ];
   tagDropState.items = items;
@@ -704,8 +704,11 @@ function renderTagDropdown() {
       : state.activeTags.has(t.name);
     if (inFilter) cls.push('in-filter');
     const icon = t.kind === 'person' ? '👤' : '#';
+    const clusterBadge = (t.kind === 'person' && t.n_clusters > 1)
+      ? ` <span class="count" style="background:#fde6c4;color:#92400e;padding:1px 5px;border-radius:6px;">×${t.n_clusters}</span>`
+      : '';
     return `<div class="${cls.join(' ')}" data-kind="${t.kind}" data-name="${escape(t.name)}">
-      <span><span class="kind">${icon}</span>${escape(t.name)}</span><span class="count">${t.count}</span>
+      <span><span class="kind">${icon}</span>${escape(t.name)}${clusterBadge}</span><span class="count">${t.count}</span>
     </div>`;
   }).join('');
   drop.classList.add('show');
@@ -950,13 +953,93 @@ async function showPersonInWorkspace(clusterId) {
   const data = await api(`/api/people/${clusterId}?limit=500`);
   const seen = new Set(); const ids = [];
   for (const m of data.members) if (!seen.has(m.image_id)) { seen.add(m.image_id); ids.push(m.image_id); }
+  // Find sibling clusters sharing this label_user (if any).
+  let siblings = [];
+  if (data.label_user) {
+    siblings = await api(`/api/people/by-name/${encodeURIComponent(data.label_user)}/clusters`)
+      .catch(() => []);
+  }
   ws.innerHTML = '';
-  ws.appendChild(html(`<h2>${escape(data.label_user || data.label_auto || `person ${data.cluster_no}`)}</h2>`));
-  ws.appendChild(html(`<div class="auto">${ids.length} photos · ${data.size} faces in cluster</div>`));
+  const titleText = data.label_user || data.label_auto || `person ${data.cluster_no}`;
+  const titleSuffix = siblings.length > 1 ? ` <span style="font-size:12px;color:var(--muted);">(${siblings.length} clusters share this name)</span>` : '';
+  ws.appendChild(html(`<h2>${escape(titleText)}${titleSuffix}</h2>`));
+
+  // Inline rename for *this cluster only*.
+  const renameDiv = html(`<div class="rename" style="margin:6px 0 8px;">
+    <input id="person-rename-input" type="text" placeholder="rename this cluster…" value="${escape(data.label_user || '')}">
+    <button id="person-rename-save">save</button>
+    <button id="person-rename-clear" title="unname this cluster">clear</button>
+  </div>`);
+  ws.appendChild(renameDiv);
+  $('person-rename-save').onclick = () => savePersonRename(clusterId, $('person-rename-input').value.trim());
+  $('person-rename-clear').onclick = () => savePersonRename(clusterId, '');
+  $('person-rename-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); savePersonRename(clusterId, e.target.value.trim()); }
+  });
+
+  // Group operations: only meaningful when 2+ clusters share the name.
+  if (siblings.length > 1 && data.label_user) {
+    const grpDiv = html(`<div class="rename" style="margin-bottom:12px; padding:6px 8px; background:#fff7ed; border-radius:4px;">
+      <span style="font-size:12px;">all <b>${siblings.length}</b> clusters of "${escape(data.label_user)}":</span>
+      <input id="group-rename-input" type="text" placeholder="rename all to…" style="flex:1;">
+      <button id="group-rename-save">rename all</button>
+      <button id="group-split">split into ${siblings.length}</button>
+    </div>`);
+    ws.appendChild(grpDiv);
+    $('group-rename-save').onclick = () => groupRename(data.label_user, $('group-rename-input').value.trim());
+    $('group-split').onclick = () => groupSplit(data.label_user);
+    $('group-rename-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); groupRename(data.label_user, e.target.value.trim()); }
+    });
+  }
+
+  ws.appendChild(html(`<div class="auto">${ids.length} photos · ${data.size} faces in cluster ${data.cluster_no}</div>`));
   const grid = html('<div class="grid"></div>');
   ids.forEach(id => grid.appendChild(makeTile(id, `image-${id}`, null)));
   ws.appendChild(grid);
   state.viewIds = ids;
+}
+
+async function savePersonRename(clusterId, name) {
+  try {
+    await api(`/api/people/${clusterId}/name`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: name || null }),
+    });
+  } catch (e) {
+    alert('rename failed: ' + e.message);
+    return;
+  }
+  await showFacesPanel();
+  await showPersonInWorkspace(clusterId);
+}
+
+async function groupRename(oldName, newName) {
+  if (!newName) { alert('new name required'); return; }
+  try {
+    await api(`/api/people/by-name/${encodeURIComponent(oldName)}/rename`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: newName }),
+    });
+  } catch (e) {
+    alert('rename failed: ' + e.message);
+    return;
+  }
+  await showFacesPanel();
+}
+
+async function groupSplit(name) {
+  if (!confirm(`Split clusters of "${name}" into "${name} 1", "${name} 2", …?`)) return;
+  try {
+    await api(`/api/people/by-name/${encodeURIComponent(name)}/split`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+  } catch (e) {
+    alert('split failed: ' + e.message);
+    return;
+  }
+  await showFacesPanel();
 }
 
 document.querySelectorAll('.view-btn').forEach(b => {
