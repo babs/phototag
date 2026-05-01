@@ -374,8 +374,38 @@ def query(
     embedder_name: Annotated[
         str | None, typer.Option("--embedder", help="embedder model_name (auto: most populated)")
     ] = None,
+    tag: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--tag",
+            help="filter to images carrying ALL of these tags (repeatable)",
+        ),
+    ] = None,
+    person: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--person",
+            help="filter to images carrying ALL of these named faces (repeatable)",
+        ),
+    ] = None,
+    min_score: Annotated[
+        float,
+        typer.Option("--min-score", help="minimum tag score for the --tag filter"),
+    ] = 0.0,
+    run_id: Annotated[
+        int | None,
+        typer.Option("--run-id", help="restrict cluster-side filters to this cluster_run id"),
+    ] = None,
 ) -> None:
-    """Semantic search by text against cached CLIP embeddings.
+    """Semantic search by text against cached CLIP embeddings, optionally
+    intersected with tag / person / cluster filters (#28 — parity with
+    `/api/search`).
+
+    Filter semantics mirror the UI's `/api/search`: `--tag` is repeatable
+    and AND-combined; `--person` is repeatable and AND-combined; both
+    intersect with the semantic top-K. `--min-score` gates the tag filter
+    only (it has no meaning for the embedding ranking — CLIP scores
+    aren't calibrated).
 
     Note: the first call boots the CLIP text encoder (~2-3 s on CPU). Long
     queries are truncated by the CLIP tokenizer at 77 tokens; a one-line
@@ -406,20 +436,67 @@ def query(
         if not ids:
             typer.echo("[]")
             return
+        # Resolve filter sets BEFORE embedding so we can short-circuit on
+        # a no-overlap tag/person filter without booting the CLIP encoder.
+        # Each filter, when present, returns the set of image_ids it
+        # admits; we intersect.
+        allowed: set[int] | None = None
+        if tag:
+            # search_images_by_tags returns rows with id+path+tags+cluster
+            # info. We only need the image_id set for intersection.
+            tag_ids: set[int] = {
+                int(r["id"]) for r in store.search_images_by_tags(tag, min_score=min_score, limit=10**9)
+            }
+            allowed = tag_ids if allowed is None else (allowed & tag_ids)
+        if person:
+            person_ids = store.search_images_by_persons(person)
+            # Optionally restrict to a specific cluster run; silently no-op
+            # if the run id doesn't exist (mirrors api_search behavior).
+            if run_id is not None:
+                # search_images_by_persons doesn't accept run_id today;
+                # filter post-hoc via the assignments table to stay
+                # consistent. Cheap because the resulting set is small.
+                in_run = {
+                    int(r["image_id"])
+                    for r in store.conn.execute(
+                        "SELECT DISTINCT f.image_id FROM faces f "
+                        "JOIN face_cluster_assignments fca ON fca.face_id = f.id "
+                        "JOIN face_clusters fc ON fc.id = fca.cluster_id "
+                        "WHERE fc.run_id = ?",
+                        (int(run_id),),
+                    )
+                }
+                person_ids = person_ids & in_run
+            allowed = person_ids if allowed is None else (allowed & person_ids)
+        if allowed is not None and not allowed:
+            typer.echo("[]")
+            return
+
         embedder = ClipEmbedder(settings.models_dir, device=settings.device)
         q = embedder.embed_texts([text])[0].astype(np.float32, copy=False)
         # CLIP image embeddings are L2-normalized; normalize the query too.
         qn = q / (np.linalg.norm(q) + 1e-12)
         mn = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-12)
         scores = mn @ qn
+        # If we have a filter, mask scores to -inf for non-allowed ids so
+        # they never make the top-K. This is cheaper than re-allocating
+        # mat itself.
+        if allowed is not None:
+            mask = np.array([iid in allowed for iid in ids])
+            scores = np.where(mask, scores, -np.inf)
         idx = np.argsort(-scores)[:limit]
         out = []
         for i in idx:
+            score_i = float(scores[int(i)])
+            if score_i == -np.inf:
+                # All real candidates exhausted — happens when the filter
+                # admits fewer items than `limit`.
+                break
             iid = ids[int(i)]
             meta = store.get_image(int(iid))
             if meta is None:
                 continue
-            out.append({"id": iid, "path": meta["path"], "score": float(scores[int(i)])})
+            out.append({"id": iid, "path": meta["path"], "score": score_i})
         typer.echo(json.dumps(out, indent=2, default=str))
     finally:
         store.close()

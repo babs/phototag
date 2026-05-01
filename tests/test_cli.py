@@ -395,3 +395,97 @@ def test_category_per_image_override_cli(tmp_path: Path, monkeypatch: pytest.Mon
     r = runner.invoke(app, ["category", "list"])
     payload = _last_json(r.stdout)
     assert payload["image_rules"] == []
+
+
+def _seed_query_db(tmp_path: Path) -> Path:
+    """A DB with two images, tags, embeddings, and a named face on img1 —
+    just enough to exercise `phototag query`'s filter paths."""
+    db = tmp_path / "phototag.db"
+    s = Store(db)
+    img1 = s.upsert_image(
+        path=str(tmp_path / "1.jpg"),
+        hash_="h1",
+        mtime=1.0,
+        width=4,
+        height=4,
+        exif=None,
+        processed_at=_now(),
+    )
+    img2 = s.upsert_image(
+        path=str(tmp_path / "2.jpg"),
+        hash_="h2",
+        mtime=2.0,
+        width=4,
+        height=4,
+        exif=None,
+        processed_at=_now(),
+    )
+    s.replace_image_tags(img1, "ram_v1", [("cat", 0.9)])
+    s.replace_image_tags(img2, "ram_v1", [("dog", 0.9)])
+    # Two embeddings under the same model — query must pick one of them.
+    s.upsert_embedding(img1, "fake-clip", np.array([1.0, 0.0], dtype=np.float32))
+    s.upsert_embedding(img2, "fake-clip", np.array([0.0, 1.0], dtype=np.float32))
+    # One named face on img1 so --person filtering has something to AND with.
+    run = s.create_face_run({"manual": True}, _now())
+    cid = s.add_face_cluster(run_id=run, cluster_no=0, size=1, label_auto=None, label_user="Anne")
+    fid = s.insert_face(
+        image_id=img1,
+        bbox=[0, 0, 4, 4],
+        det_score=0.9,
+        embedding=np.ones(2, dtype=np.float32),
+        model_name="m",
+    )
+    s.assign_face_to_cluster(fid, cid, 0.0)
+    s.close()
+    return db
+
+
+def test_query_filter_short_circuits_without_clip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `--tag` filter that admits no images returns `[]` *without*
+    booting the CLIP encoder (#28). Exercises the filter resolution path
+    in isolation — no [clip] extra needed."""
+    db = _seed_query_db(tmp_path)
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+    r = runner.invoke(
+        app,
+        ["query", "anything", "--embedder", "fake-clip", "--tag", "ghost-tag"],
+    )
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload == []
+
+
+def test_query_person_filter_short_circuits_without_clip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown `--person` filter (no images carry that name) likewise
+    short-circuits to `[]` before touching the CLIP encoder."""
+    db = _seed_query_db(tmp_path)
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+    r = runner.invoke(
+        app,
+        ["query", "anything", "--embedder", "fake-clip", "--person", "Ghost"],
+    )
+    assert r.exit_code == 0, r.output
+    assert _last_json(r.stdout) == []
+
+
+def test_query_with_clip_filter_intersects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When `--tag` admits exactly one image, `phototag query` returns
+    only that image regardless of the embedding ranking. Skips if
+    [clip] extra isn't installed (CI fast job)."""
+    pytest.importorskip("open_clip")
+    db = _seed_query_db(tmp_path)
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+    r = runner.invoke(
+        app,
+        ["query", "anything", "--embedder", "fake-clip", "--tag", "cat", "--limit", "5"],
+    )
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    # Only img1 carries the "cat" tag.
+    assert len(payload) == 1
+    assert payload[0]["path"].endswith("1.jpg")
