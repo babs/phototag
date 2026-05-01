@@ -33,8 +33,10 @@ from .store import Store
 log = get_logger(__name__)
 THUMB_SIZE = 320
 PREVIEW_SIZE = 1280
+FACE_THUMB_SIZE = 192
 THUMB_CACHE = Path("data/thumbs-cache")
 PREVIEW_CACHE = Path("data/previews-cache")
+FACE_THUMB_CACHE = Path("data/face-thumbs-cache")
 
 
 class RenameRequest(BaseModel):
@@ -69,6 +71,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     db = db_path or settings.db_path
     THUMB_CACHE.mkdir(parents=True, exist_ok=True)
     PREVIEW_CACHE.mkdir(parents=True, exist_ok=True)
+    FACE_THUMB_CACHE.mkdir(parents=True, exist_ok=True)
 
     app = FastAPI(title="phototag UI")
     app.add_middleware(
@@ -199,6 +202,131 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         if not src.exists():
             raise HTTPException(status_code=404, detail="file not found on disk")
         return FileResponse(src, headers=_CACHE_HEADERS)
+
+    # ---- faces (v2) ----
+
+    def _face_color(cluster_id: int | None) -> str:
+        if cluster_id is None:
+            return "hsl(0, 0%, 70%)"
+        return f"hsl({(cluster_id * 137) % 360}, 70%, 55%)"
+
+    @app.get("/api/images/{image_id}/faces")
+    def api_image_faces(image_id: int) -> list[dict[str, Any]]:
+        s = _store(app)
+        if s.get_image(image_id) is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        out = []
+        seen: set[int] = set()
+        # An image can have rows from multiple cluster runs; latest run wins.
+        latest = s.latest_face_run()
+        for f in s.list_faces_for_image(image_id):
+            if f["id"] in seen:
+                continue
+            # Prefer the row that matches the latest run (if any).
+            if latest is not None and f["cluster_id"] is not None:
+                cluster = s.get_face_cluster(int(f["cluster_id"]))
+                if cluster and cluster["run_id"] != latest:
+                    continue
+            seen.add(f["id"])
+            out.append(
+                {
+                    "id": f["id"],
+                    "bbox": f["bbox"],
+                    "det_score": f["det_score"],
+                    "cluster_id": f["cluster_id"],
+                    "cluster_no": f["cluster_no"],
+                    "label": f["label_user"] or f["label_auto"],
+                    "named": f["label_user"] is not None,
+                    "color": _face_color(f["cluster_id"]),
+                }
+            )
+        return out
+
+    @app.get("/api/people")
+    def api_people(
+        run_id: int | None = None,
+        only_named: bool = False,
+    ) -> list[dict[str, Any]]:
+        s = _store(app)
+        rid = run_id if run_id is not None else s.latest_face_run()
+        if rid is None:
+            return []
+        rows = s.list_face_clusters(rid)
+        out = []
+        for c in rows:
+            if c["cluster_no"] == -1:
+                continue
+            if only_named and not c["label_user"]:
+                continue
+            members = s.face_cluster_members(c["id"], limit=3)
+            out.append(
+                {
+                    "cluster_id": c["id"],
+                    "cluster_no": c["cluster_no"],
+                    "name": c["label_user"],
+                    "auto": c["label_auto"],
+                    "size": c["size"],
+                    "color": _face_color(c["id"]),
+                    "samples": [{"face_id": m["face_id"], "image_id": m["image_id"]} for m in members],
+                }
+            )
+        return out
+
+    @app.get("/api/people/{cluster_id}")
+    def api_person(
+        cluster_id: int,
+        limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    ) -> dict[str, Any]:
+        s = _store(app)
+        cluster = s.get_face_cluster(cluster_id)
+        if cluster is None:
+            raise HTTPException(status_code=404, detail="face cluster not found")
+        members = s.face_cluster_members(cluster_id, limit=limit)
+        return {
+            **cluster,
+            "color": _face_color(cluster_id),
+            "members": members,
+        }
+
+    class FaceNameRequest(BaseModel):
+        name: str | None
+
+    @app.post("/api/people/{cluster_id}/name")
+    def api_person_rename(cluster_id: int, body: FaceNameRequest) -> dict[str, Any]:
+        from .faces import name_cluster
+
+        s = _store(app)
+        if s.get_face_cluster(cluster_id) is None:
+            raise HTTPException(status_code=404, detail="face cluster not found")
+        try:
+            name_cluster(s, cluster_id, body.name or None)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        log.info("face_cluster_named", cluster_id=cluster_id, name=body.name)
+        return {"ok": True, "cluster_id": cluster_id, "name": body.name}
+
+    @app.get("/face-thumb/{face_id}")
+    def face_thumb(face_id: int) -> FileResponse:
+        s = _store(app)
+        face = s.get_face(face_id)
+        if face is None:
+            raise HTTPException(status_code=404, detail="face not found")
+        meta = s.get_image(int(face["image_id"]))
+        if meta is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        dst = FACE_THUMB_CACHE / f"{face_id}.jpg"
+        if not dst.exists():
+            try:
+                from .faces import crop_face
+
+                with Image.open(meta["path"]) as src_img:
+                    cropped = crop_face(src_img, face["bbox"])
+                    cropped.thumbnail((FACE_THUMB_SIZE, FACE_THUMB_SIZE))
+                    cropped.save(dst, format="JPEG", quality=85)
+            except Exception as e:
+                log.warning("face_thumb_failed", face_id=face_id, error=str(e))
+                raise HTTPException(status_code=500, detail="thumb failed") from e
+        return FileResponse(dst, media_type="image/jpeg", headers=_CACHE_HEADERS)
 
     return app
 

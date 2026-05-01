@@ -69,6 +69,30 @@
   .filters .x { cursor: pointer; opacity: 0.6; }
   .filters .x:hover { opacity: 1; }
   details summary { cursor: pointer; padding: 4px 0; }
+  /* face overlays in the lightbox */
+  .face-layer { position: absolute; pointer-events: none; }
+  .face-box {
+    position: absolute; box-sizing: border-box;
+    border: 2px solid var(--c, #fff); border-radius: 2px;
+    pointer-events: auto; cursor: pointer;
+    transition: opacity 0.1s;
+  }
+  .face-box:hover { box-shadow: 0 0 0 4px rgba(255,255,255,0.25); }
+  .face-box .face-label {
+    position: absolute; bottom: -22px; left: 0; padding: 1px 6px; font-size: 11px;
+    background: var(--c, #fff); color: #111; border-radius: 2px; white-space: nowrap;
+    max-width: 240px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .face-box.unnamed .face-label { background: rgba(255,255,255,0.85); color: #555; }
+  .face-name-form {
+    position: fixed; z-index: 200; background: #222; color: #fff;
+    padding: 8px; border-radius: 4px; box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+    display: flex; gap: 6px;
+  }
+  .face-name-form input {
+    border: 1px solid #555; background: #111; color: #fff;
+    padding: 4px 6px; border-radius: 3px; font-size: 13px; width: 200px;
+  }
   /* tag search dropdown */
   .ts-wrap { position: relative; display: block; }
   .ts-drop {
@@ -145,9 +169,18 @@
   <span class="close" onclick="closeLightbox()">×</span>
   <span class="counter" id="lightbox-counter"></span>
   <span class="nav prev" onclick="navLightbox(-1)">‹</span>
-  <img id="lightbox-img" alt="">
+  <span class="counter" style="top:16px; right:80px;" id="lightbox-toggle-faces">faces (F)</span>
+  <div style="position:relative; max-width:95vw; max-height:80vh;" id="lightbox-stage">
+    <img id="lightbox-img" alt="">
+    <div id="face-layer" class="face-layer"></div>
+  </div>
   <span class="nav next" onclick="navLightbox(1)">›</span>
   <div class="info" id="lightbox-info"></div>
+</div>
+<div id="face-name-form" class="face-name-form" style="display:none;">
+  <input id="face-name-input" type="text" placeholder="name this person…" autocomplete="off">
+  <button id="face-name-save">save</button>
+  <button id="face-name-cancel">×</button>
 </div>
 <script>
 const state = {
@@ -302,15 +335,24 @@ async function showCurrentLightbox() {
   const img = $('lightbox-img');
   img.src = assetUrl('preview', id);
   img.dataset.imageId = id;
+  $('face-layer').innerHTML = '';
   $('lightbox-counter').textContent = `${state.viewIndex + 1} / ${state.viewIds.length}`;
   $('lightbox-info').innerHTML = '<div>loading…</div>';
   preloadNeighbors(state.viewIndex);
-  const info = await api(`/api/images/${id}`);
+  const [info, faces] = await Promise.all([
+    api(`/api/images/${id}`),
+    api(`/api/images/${id}/faces`).catch(() => []),
+  ]);
   if (myToken !== lightboxToken) return;  // user navigated again before fetch returned
   const tagHtml = info.tags.map(t =>
     `<span class="tag" onclick="toggleTag('${escape(t.name)}'); closeLightbox();">${escape(t.name)} <span class="count">${t.score.toFixed(2)}</span></span>`
   ).join('');
   $('lightbox-info').innerHTML = `<div>${escape(info.path)} · <a href="${assetUrl('raw', id)}" target="_blank" style="color:#9cf;">open original</a></div>${formatExif(info.exif)}<div class="tags" style="margin-top:6px;">${tagHtml}</div>`;
+  state.lightboxFaces = faces;
+  state.lightboxImage = info;
+  // Render once the displayed size is known.
+  if (img.complete && img.naturalWidth > 0) renderFaceOverlays();
+  else img.addEventListener('load', renderFaceOverlays, { once: true });
 }
 
 function formatExif(exif) {
@@ -358,7 +400,120 @@ function navLightbox(delta) {
   showCurrentLightbox();
 }
 
-function closeLightbox() { $('lightbox').classList.remove('show'); }
+function closeLightbox() {
+  $('lightbox').classList.remove('show');
+  closeFaceNameForm();
+}
+
+// ---- face overlays in the lightbox ---------------------------------------
+
+state.lightboxFaces = [];
+state.lightboxImage = null;
+state.facesVisible = true;
+
+function renderFaceOverlays() {
+  const img = $('lightbox-img');
+  const layer = $('face-layer');
+  layer.innerHTML = '';
+  if (!state.facesVisible || !state.lightboxFaces.length) return;
+  if (!img.naturalWidth) return;
+  // The face layer has the same size as the rendered image, but the image is
+  // rendered at clientWidth/clientHeight while bboxes are in naturalWidth/Height.
+  const sx = img.clientWidth / img.naturalWidth;
+  const sy = img.clientHeight / img.naturalHeight;
+  layer.style.left = img.offsetLeft + 'px';
+  layer.style.top = img.offsetTop + 'px';
+  layer.style.width = img.clientWidth + 'px';
+  layer.style.height = img.clientHeight + 'px';
+  for (const f of state.lightboxFaces) {
+    if (!f.bbox || f.bbox.length !== 4) continue;
+    const [x, y, w, h] = f.bbox;
+    const box = document.createElement('div');
+    box.className = 'face-box' + (f.named ? '' : ' unnamed');
+    box.style.setProperty('--c', f.color);
+    box.style.left = (x * sx) + 'px';
+    box.style.top = (y * sy) + 'px';
+    box.style.width = (w * sx) + 'px';
+    box.style.height = (h * sy) + 'px';
+    box.title = f.label || 'unnamed face';
+    const lbl = document.createElement('div');
+    lbl.className = 'face-label';
+    lbl.textContent = f.label || 'name…';
+    box.appendChild(lbl);
+    box.onclick = (e) => { e.stopPropagation(); onFaceClicked(f, e.clientX, e.clientY); };
+    layer.appendChild(box);
+  }
+}
+
+window.addEventListener('resize', renderFaceOverlays);
+
+function toggleFaceOverlays() {
+  state.facesVisible = !state.facesVisible;
+  $('lightbox-toggle-faces').style.opacity = state.facesVisible ? '1' : '0.4';
+  renderFaceOverlays();
+}
+
+$('lightbox-toggle-faces').onclick = (e) => { e.stopPropagation(); toggleFaceOverlays(); };
+
+async function onFaceClicked(face, clickX, clickY) {
+  if (face.named && face.cluster_id != null) {
+    // Navigate the lightbox to this person's photos.
+    await viewPerson(face.cluster_id);
+    return;
+  }
+  openFaceNameForm(face, clickX, clickY);
+}
+
+let pendingFace = null;
+
+function openFaceNameForm(face, x, y) {
+  pendingFace = face;
+  const form = $('face-name-form');
+  form.style.left = Math.min(window.innerWidth - 320, x) + 'px';
+  form.style.top = Math.min(window.innerHeight - 60, y) + 'px';
+  form.style.display = 'flex';
+  $('face-name-input').value = '';
+  $('face-name-input').focus();
+}
+
+function closeFaceNameForm() {
+  $('face-name-form').style.display = 'none';
+  pendingFace = null;
+}
+
+async function saveFaceName() {
+  if (!pendingFace) return;
+  const name = $('face-name-input').value.trim();
+  if (!name || pendingFace.cluster_id == null) { closeFaceNameForm(); return; }
+  await api(`/api/people/${pendingFace.cluster_id}/name`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name }),
+  });
+  closeFaceNameForm();
+  // Reload faces for current image so this overlay updates immediately.
+  showCurrentLightbox();
+}
+
+$('face-name-save').onclick = saveFaceName;
+$('face-name-cancel').onclick = closeFaceNameForm;
+$('face-name-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') saveFaceName();
+  else if (e.key === 'Escape') closeFaceNameForm();
+});
+
+async function viewPerson(clusterId) {
+  // Pull all photos containing that person; replace the current view with them.
+  const data = await api(`/api/people/${clusterId}?limit=500`);
+  const ids = [];
+  const seen = new Set();
+  for (const m of data.members) {
+    if (!seen.has(m.image_id)) { seen.add(m.image_id); ids.push(m.image_id); }
+  }
+  if (!ids.length) return;
+  state.viewIds = ids;
+  state.viewIndex = 0;
+  showCurrentLightbox();
+}
 
 function renderActiveFilters() {
   const root = $('active-tags');
@@ -509,7 +664,10 @@ $('tag-input').addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   const open = $('lightbox').classList.contains('show');
   if (!open) return;
+  // Don't intercept while typing in the face-name form.
+  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
   if (e.key === 'Escape') closeLightbox();
+  else if (e.key === 'f' || e.key === 'F') { e.preventDefault(); toggleFaceOverlays(); }
   else if (e.key === 'ArrowLeft' || e.key === 'PageUp' || e.key === 'k') { e.preventDefault(); navLightbox(-1); }
   else if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === 'j' || e.key === ' ') { e.preventDefault(); navLightbox(1); }
 });

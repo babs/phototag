@@ -70,6 +70,51 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX IF NOT EXISTS idx_image_clusters_cluster ON image_clusters(cluster_id);
     """,
+    """
+    -- v4: face detection / recognition (opt-in; see specs/15-faces.md)
+    CREATE TABLE IF NOT EXISTS faces (
+        id           INTEGER PRIMARY KEY,
+        image_id     INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+        bbox_json    TEXT NOT NULL,
+        det_score    REAL NOT NULL,
+        embedding    BLOB NOT NULL,
+        dim          INTEGER NOT NULL,
+        model_name   TEXT NOT NULL,
+        landmarks_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_faces_image ON faces(image_id);
+
+    CREATE TABLE IF NOT EXISTS face_runs (
+        id          INTEGER PRIMARY KEY,
+        created_at  TEXT NOT NULL,
+        params_json TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS face_clusters (
+        id         INTEGER PRIMARY KEY,
+        run_id     INTEGER NOT NULL REFERENCES face_runs(id) ON DELETE CASCADE,
+        cluster_no INTEGER NOT NULL,
+        size       INTEGER NOT NULL,
+        label_user TEXT,
+        label_auto TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_face_clusters_run ON face_clusters(run_id);
+
+    CREATE TABLE IF NOT EXISTS face_cluster_assignments (
+        face_id    INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
+        cluster_id INTEGER NOT NULL REFERENCES face_clusters(id) ON DELETE CASCADE,
+        distance   REAL NOT NULL,
+        PRIMARY KEY (face_id, cluster_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fca_cluster ON face_cluster_assignments(cluster_id);
+
+    CREATE TABLE IF NOT EXISTS face_identities (
+        id        INTEGER PRIMARY KEY,
+        name      TEXT NOT NULL UNIQUE,
+        centroid  BLOB NOT NULL,
+        dim       INTEGER NOT NULL,
+        n_samples INTEGER NOT NULL
+    );
+    """,
 ]
 
 
@@ -462,3 +507,222 @@ class Store:
             (cluster_id,),
         ).fetchone()
         return dict(row) if row else None
+
+    # ---- faces (v2) ----
+
+    def insert_face(
+        self,
+        *,
+        image_id: int,
+        bbox: list[int],
+        det_score: float,
+        embedding: np.ndarray,
+        model_name: str,
+        landmarks: list[list[float]] | None = None,
+    ) -> int:
+        v = np.ascontiguousarray(embedding, dtype=np.float32)
+        cur = self.conn.execute(
+            """
+            INSERT INTO faces(image_id,bbox_json,det_score,embedding,dim,model_name,landmarks_json)
+            VALUES(?,?,?,?,?,?,?) RETURNING id
+            """,
+            (
+                image_id,
+                json.dumps(bbox),
+                float(det_score),
+                v.tobytes(),
+                int(v.shape[0]),
+                model_name,
+                json.dumps(landmarks) if landmarks else None,
+            ),
+        )
+        return int(cur.fetchone()["id"])
+
+    def has_faces(self, image_id: int, model_name: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM faces WHERE image_id=? AND model_name=? LIMIT 1",
+            (image_id, model_name),
+        ).fetchone()
+        return row is not None
+
+    def delete_faces_for_image(self, image_id: int, model_name: str) -> None:
+        self.conn.execute(
+            "DELETE FROM faces WHERE image_id=? AND model_name=?",
+            (image_id, model_name),
+        )
+
+    def load_face_embeddings(self, model_name: str) -> tuple[list[int], np.ndarray]:
+        cur = self.conn.execute(
+            "SELECT id, dim, embedding FROM faces WHERE model_name=? ORDER BY id",
+            (model_name,),
+        )
+        ids: list[int] = []
+        vectors: list[np.ndarray] = []
+        for row in cur:
+            ids.append(int(row["id"]))
+            vectors.append(np.frombuffer(row["embedding"], dtype=np.float32, count=int(row["dim"])))
+        if not ids:
+            return [], np.zeros((0, 0), dtype=np.float32)
+        return ids, np.vstack(vectors)
+
+    def list_faces_for_image(self, image_id: int) -> list[dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT f.id, f.bbox_json, f.det_score,
+                   fc.id AS cluster_id, fc.cluster_no, fc.label_user, fc.label_auto
+            FROM faces f
+            LEFT JOIN face_cluster_assignments fca ON fca.face_id = f.id
+            LEFT JOIN face_clusters fc ON fc.id = fca.cluster_id
+            WHERE f.image_id = ?
+            """,
+            (image_id,),
+        )
+        out: list[dict[str, Any]] = []
+        for row in cur:
+            try:
+                bbox = json.loads(row["bbox_json"])
+            except json.JSONDecodeError:
+                bbox = None
+            out.append(
+                {
+                    "id": int(row["id"]),
+                    "bbox": bbox,
+                    "det_score": float(row["det_score"]),
+                    "cluster_id": row["cluster_id"],
+                    "cluster_no": row["cluster_no"],
+                    "label_user": row["label_user"],
+                    "label_auto": row["label_auto"],
+                }
+            )
+        return out
+
+    def get_face(self, face_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT id, image_id, bbox_json, det_score, model_name FROM faces WHERE id=?",
+            (face_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        try:
+            d["bbox"] = json.loads(d.pop("bbox_json"))
+        except json.JSONDecodeError:
+            d["bbox"] = None
+        return d
+
+    def count_faces(self) -> int:
+        return int(self.conn.execute("SELECT COUNT(*) AS n FROM faces").fetchone()["n"])
+
+    def create_face_run(self, params: dict[str, Any], created_at: str) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO face_runs(created_at,params_json) VALUES(?,?) RETURNING id",
+            (created_at, json.dumps(params)),
+        )
+        return int(cur.fetchone()["id"])
+
+    def add_face_cluster(
+        self,
+        *,
+        run_id: int,
+        cluster_no: int,
+        size: int,
+        label_auto: str | None,
+        label_user: str | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO face_clusters(run_id,cluster_no,size,label_auto,label_user) "
+            "VALUES(?,?,?,?,?) RETURNING id",
+            (run_id, cluster_no, size, label_auto, label_user),
+        )
+        return int(cur.fetchone()["id"])
+
+    def assign_face_to_cluster(self, face_id: int, cluster_id: int, distance: float) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO face_cluster_assignments(face_id,cluster_id,distance) VALUES(?,?,?)",
+            (face_id, cluster_id, float(distance)),
+        )
+
+    def latest_face_run(self) -> int | None:
+        row = self.conn.execute("SELECT id FROM face_runs ORDER BY id DESC LIMIT 1").fetchone()
+        return int(row["id"]) if row else None
+
+    def list_face_clusters(self, run_id: int) -> list[dict[str, Any]]:
+        cur = self.conn.execute(
+            "SELECT id, cluster_no, size, label_auto, label_user FROM face_clusters "
+            "WHERE run_id=? ORDER BY (label_user IS NULL), size DESC",
+            (run_id,),
+        )
+        return [dict(r) for r in cur]
+
+    def get_face_cluster(self, cluster_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT id, run_id, cluster_no, size, label_auto, label_user FROM face_clusters WHERE id=?",
+            (cluster_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def face_cluster_members(self, cluster_id: int, *, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = """
+            SELECT f.id AS face_id, f.image_id, f.bbox_json, f.det_score, fca.distance, i.path
+            FROM face_cluster_assignments fca
+            JOIN faces f ON f.id = fca.face_id
+            JOIN images i ON i.id = f.image_id
+            WHERE fca.cluster_id = ?
+            ORDER BY fca.distance ASC
+        """
+        params: list[Any] = [cluster_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        cur = self.conn.execute(sql, params)
+        out: list[dict[str, Any]] = []
+        for row in cur:
+            d = dict(row)
+            try:
+                d["bbox"] = json.loads(d.pop("bbox_json"))
+            except json.JSONDecodeError:
+                d["bbox"] = None
+            out.append(d)
+        return out
+
+    def set_face_cluster_label_user(self, cluster_id: int, label: str | None) -> None:
+        self.conn.execute(
+            "UPDATE face_clusters SET label_user=? WHERE id=?",
+            (label, cluster_id),
+        )
+
+    def list_face_identities(self) -> list[dict[str, Any]]:
+        cur = self.conn.execute("SELECT id, name, centroid, dim, n_samples FROM face_identities")
+        out: list[dict[str, Any]] = []
+        for row in cur:
+            out.append(
+                {
+                    "id": int(row["id"]),
+                    "name": row["name"],
+                    "centroid": np.frombuffer(row["centroid"], dtype=np.float32, count=int(row["dim"])),
+                    "dim": int(row["dim"]),
+                    "n_samples": int(row["n_samples"]),
+                }
+            )
+        return out
+
+    def upsert_face_identity(self, name: str, centroid: np.ndarray, n_samples: int) -> int:
+        v = np.ascontiguousarray(centroid, dtype=np.float32)
+        cur = self.conn.execute(
+            """
+            INSERT INTO face_identities(name,centroid,dim,n_samples) VALUES(?,?,?,?)
+            ON CONFLICT(name) DO UPDATE SET
+                centroid=excluded.centroid, dim=excluded.dim, n_samples=excluded.n_samples
+            RETURNING id
+            """,
+            (name, v.tobytes(), int(v.shape[0]), int(n_samples)),
+        )
+        return int(cur.fetchone()["id"])
+
+    def purge_faces(self, *, keep_identities: bool = False) -> None:
+        self.conn.execute("DELETE FROM face_cluster_assignments")
+        self.conn.execute("DELETE FROM face_clusters")
+        self.conn.execute("DELETE FROM face_runs")
+        self.conn.execute("DELETE FROM faces")
+        if not keep_identities:
+            self.conn.execute("DELETE FROM face_identities")

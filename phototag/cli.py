@@ -322,5 +322,161 @@ def serve(
     uvicorn.run(fapp, host=host, port=port, log_config=None, access_log=False)
 
 
+# ---- faces (opt-in; see specs/15-faces.md) ----
+
+faces_app = typer.Typer(help="Face detection / recognition (opt-in, biometric).")
+app.add_typer(faces_app, name="faces")
+
+
+_FACES_GATE_KEY = "faces_consent"
+
+
+def _faces_gate(store: Store, i_understand: bool) -> None:
+    row = store.conn.execute("SELECT value FROM meta WHERE key=?", (_FACES_GATE_KEY,)).fetchone()
+    if row:
+        return
+    if not i_understand:
+        typer.echo(
+            "Face features process biometric data. Embeddings are stored locally "
+            "and never leave this machine. Re-run with --i-understand to enable.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    store.conn.execute(
+        "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (_FACES_GATE_KEY, "yes"),
+    )
+
+
+@faces_app.command("detect")
+def faces_detect(
+    limit: Annotated[int | None, typer.Option(help="optional row cap")] = None,
+    force: Annotated[bool, typer.Option(help="re-detect even if faces present")] = False,
+    i_understand: Annotated[
+        bool,
+        typer.Option(
+            "--i-understand",
+            help="acknowledge biometric data on first run (one-time gate)",
+        ),
+    ] = False,
+) -> None:
+    """Detect faces in every image and persist embeddings."""
+    from .faces import FaceDetector, detect_faces_all
+
+    settings = load_settings()
+    log = get_logger("phototag.faces")
+    store = Store(settings.db_path)
+    try:
+        _faces_gate(store, i_understand)
+        det = FaceDetector(settings.models_dir, device=settings.device)
+        counts = detect_faces_all(store, det, force=force, limit=limit)
+        log.info("faces_detect_summary", **counts)
+        typer.echo(json.dumps(counts, indent=2))
+    finally:
+        store.close()
+
+
+@faces_app.command("cluster")
+def faces_cluster(
+    min_size: Annotated[int, typer.Option("--min-size", help="HDBSCAN min_cluster_size")] = 3,
+    min_samples: Annotated[int, typer.Option(help="HDBSCAN min_samples")] = 2,
+) -> None:
+    """Cluster face embeddings into people; carry forward existing names."""
+    from .faces import cluster_faces
+
+    settings = load_settings()
+    log = get_logger("phototag.faces")
+    store = Store(settings.db_path)
+    try:
+        run_id = cluster_faces(store, min_cluster_size=min_size, min_samples=min_samples)
+        log.info("faces_cluster_run", run_id=run_id)
+        typer.echo(f"face cluster run {run_id} created")
+    finally:
+        store.close()
+
+
+@faces_app.command("name")
+def faces_name(
+    cluster_id: Annotated[int, typer.Argument(help="face_clusters.id")],
+    label: Annotated[str, typer.Argument(help="person name")],
+) -> None:
+    """Name a face cluster; the name persists across re-clustering runs."""
+    from .faces import name_cluster
+
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        name_cluster(store, cluster_id, label)
+        typer.echo(f"face cluster {cluster_id} → {label!r}")
+    finally:
+        store.close()
+
+
+@faces_app.command("unname")
+def faces_unname(
+    cluster_id: Annotated[int, typer.Argument(help="face_clusters.id")],
+) -> None:
+    """Clear the user-assigned name on a face cluster (does not touch identities)."""
+    from .faces import name_cluster
+
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        name_cluster(store, cluster_id, None)
+        typer.echo(f"face cluster {cluster_id} unnamed")
+    finally:
+        store.close()
+
+
+@faces_app.command("purge")
+def faces_purge(
+    keep_identities: Annotated[
+        bool, typer.Option(help="keep face_identities table; drop everything else")
+    ] = False,
+    yes: Annotated[bool, typer.Option(help="skip confirmation")] = False,
+) -> None:
+    """Drop all face data."""
+    if not yes:
+        typer.confirm(
+            "This will delete all face detections, clusters, and identities. Continue?",
+            abort=True,
+        )
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        with store.transaction():
+            store.purge_faces(keep_identities=keep_identities)
+        typer.echo("faces purged")
+    finally:
+        store.close()
+
+
+@faces_app.command("stats")
+def faces_stats() -> None:
+    """Quick counts: faces, clusters, runs, identities."""
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        n_faces = store.count_faces()
+        n_run = store.latest_face_run() or 0
+        n_clusters = len(store.list_face_clusters(n_run)) if n_run else 0
+        n_named = sum(1 for c in store.list_face_clusters(n_run) if c["label_user"]) if n_run else 0
+        n_ids = len(store.list_face_identities())
+        typer.echo(
+            json.dumps(
+                {
+                    "faces": n_faces,
+                    "latest_run": n_run,
+                    "clusters_in_latest_run": n_clusters,
+                    "named_clusters": n_named,
+                    "identities": n_ids,
+                },
+                indent=2,
+            )
+        )
+    finally:
+        store.close()
+
+
 if __name__ == "__main__":
     app()
