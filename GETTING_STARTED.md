@@ -152,6 +152,10 @@ uv run phototag prune --apply
 - `report*/` — generated HTML reports.
 - `specs/` — design + roadmap; `specs/16-improvement-plan.md` tracks the
   forward-looking backlog (🟢 shipped / ⬜ pending).
+- `static/src/` — ESM source for the UI; bundled to `static/ui.js` via
+  esbuild. After editing JS, run `make js-build` (one-time `npm install`
+  first to fetch esbuild). Bundle output is committed; `node_modules/` is
+  gitignored.
 
 ## 10. Configuration
 

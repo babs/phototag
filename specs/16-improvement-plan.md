@@ -48,7 +48,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | 22 | XMP sidecar writer (v2 leftover) | ⬜ | 4 h | `phototag xmp write/clean` via exiftool subprocess; round-trip for digiKam / Lightroom |
 | 23 | Categories + tag/cluster mapping (v2 leftover) | ⬜ | 1 d | schema + CLI + UI mapping rules (see `08-xmp-categories.md`) |
 | 24 | CI pipeline | ⬜ | 4 h | GitHub Actions workflow: ruff + mypy + pytest -m "not slow"; nightly slow run |
-| 25 | JS bundling / module split | ⬜ | 1 d | `static/ui.js` is at 1500+ lines; esbuild + module split keeps maintainability sane |
+| 25 | JS bundling / module split | 🟢 | 1 d | source moved to `static/src/{state,api,lightbox,sidebar,workspace,keyboard,runs,main}.js`; esbuild bundles to `static/ui.js` (single ES2020 IIFE) via `make js-build` / `make js-watch`; `package.json` + `package-lock.json` committed, `node_modules/` gitignored; bundle output stays committed so the app works without running the bundler; `<script>` cache-buster `?v={{ version }}` unchanged. Fallback path when no bundler is installed: `make js-build` prints an install hint and exits non-zero — contributors run `npm install` once. |
 
 ## What's already shipped (current state)
 
@@ -122,8 +122,10 @@ Eight items remain (⬜ above). Grouped by ROI on the daily flow:
 **Infra** (independent track):
 - **#24** — CI pipeline. GitHub Actions: ruff + mypy + pytest -m "not
   slow"; nightly slow run.
-- **#25** — JS bundling / module split. `static/ui.js` is past 1500
-  lines; esbuild + module split before the next big UI feature.
+- **#25** — JS bundling / module split (DONE). Source split into
+  `static/src/{state,api,lightbox,sidebar,workspace,keyboard,runs,main}.js`;
+  esbuild bundles to `static/ui.js` via `make js-build`. Bundle output is
+  committed so the app works without running the bundler.
 
 Recommended next pick if you want one half-day item: **#16** (cleans up
 a long-standing inconsistency that will start mattering as the UI grows
