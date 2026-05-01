@@ -41,9 +41,14 @@ from .settings import load as load_settings
 from .store import Store
 
 log = get_logger(__name__)
-THUMB_SIZE = 320
-PREVIEW_SIZE = 1280
-FACE_THUMB_SIZE = 192
+# Cache image sizes for the lightbox / overlay paths. Locked in code on
+# purpose — exposing as config invites "I'll just bump it" tuning that
+# silently changes face-overlay coord math (PREVIEW_SIZE must stay equal
+# to faces.DETECT_MAX_SIDE so bbox values line up between detect-time
+# and lightbox-render-time).
+THUMB_SIZE = 320  # sidebar / grid thumb max side
+PREVIEW_SIZE = 1280  # lightbox preview; matches faces.DETECT_MAX_SIDE
+FACE_THUMB_SIZE = 192  # /face-thumb/{id} crop max side
 THUMB_CACHE = Path("data/thumbs-cache")
 PREVIEW_CACHE = Path("data/previews-cache")
 FACE_THUMB_CACHE = Path("data/face-thumbs-cache")
@@ -131,8 +136,20 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.store = Store(db)
         app.state.face_detector = None
+        # Lock guards the *initialization* of the detector (200 MB model
+        # weights load — two concurrent first calls would OOM).
         app.state.face_detector_lock = threading.Lock()
-        log.info("ui_started", db=str(db))
+        # Bounded semaphore caps concurrent `det.detect(img)` calls. A
+        # single redraw runs 7 detector forwards (~1–3 s on CPU). Without
+        # a cap, two browser tabs could both spam the endpoint and
+        # saturate the GPU/CPU; insightface itself is thread-safe per
+        # inference but doesn't queue. Default 2 lets one redraw and one
+        # background re-detect overlap; tune via `APP_FACE_DETECT_CONCURRENCY`
+        # only if you know the hardware can take more.
+        max_concurrent = max(1, int(os.getenv("APP_FACE_DETECT_CONCURRENCY", "2")))
+        app.state.face_detector_sem = threading.BoundedSemaphore(max_concurrent)
+        app.state.face_detector_max_concurrent = max_concurrent
+        log.info("ui_started", db=str(db), face_detect_concurrency=max_concurrent)
         try:
             yield
         finally:
@@ -559,7 +576,8 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         try:
             with _Image.open(src) as img:
                 img.load()
-                new_faces = det.detect(img)
+                with app.state.face_detector_sem:
+                    new_faces = det.detect(img)
         except Exception as e:
             log.error("face_redetect_failed", path=str(src), error=str(e))
             raise HTTPException(status_code=500, detail=f"detect failed: {e}") from e
@@ -821,66 +839,95 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
         # Pad the crop so RetinaFace has context — it expects faces to sit
         # inside a frame that includes some shoulders / hair / background.
-        # A tight 25 % margin (the original #13 default) frequently produced
-        # empty detections on near-edge or square crops. We try 50 % first
-        # and double the margin up to 200 % if RetinaFace still finds
-        # nothing. Larger margins risk picking up a NEIGHBORING face, which
-        # the centered-in-user-box filter below guards against.
-        def _crop_with_margin(margin_frac: float) -> tuple[int, int, int, int, Image.Image]:
+        # We refine in two ways:
+        #   (1) multi-margin: 0.5 / 1.0 / 2.0 — RetinaFace produces different
+        #       det_scores depending on how much non-face context surrounds
+        #       the target. Always running all three and picking best beats
+        #       breaking on the first that succeeds.
+        #   (2) ¼-box offset sweep at the middle margin (1.0): center, then
+        #       ±0.25w in x and ±0.25h in y — nudges a slightly off-centered
+        #       user rectangle onto the actual face center, which often lifts
+        #       det_score noticeably.
+        # Total: 3 + 4 = 7 detector forwards. ~0.5–1 s on CPU, ~50–100 ms on
+        # GPU. The user-initiated nature (one shot per redraw) makes this
+        # latency tolerable for the quality bump.
+        def _crop_around(cx_user: int, cy_user: int, margin_frac: float) -> tuple[int, int, Image.Image]:
             mx = int(round(w * margin_frac))
             my = int(round(h * margin_frac))
-            cx0 = max(0, x - mx)
-            cy0 = max(0, y - my)
-            cx1 = min(W, x + w + mx)
-            cy1 = min(H, y + h + my)
-            return cx0, cy0, cx1, cy1, resized.crop((cx0, cy0, cx1, cy1))
+            cx0 = max(0, cx_user - mx)
+            cy0 = max(0, cy_user - my)
+            cx1 = min(W, cx_user + w + mx)
+            cy1 = min(H, cy_user + h + my)
+            return cx0, cy0, resized.crop((cx0, cy0, cx1, cy1))
 
         # User's drawn rect is the "intended" target — any face whose
         # CENTER falls inside it is what they meant; faces whose centers
         # land elsewhere in the padded crop are rejected so we don't pick
-        # up a neighbor when the margin balloons.
+        # up a neighbor when the crop balloons.
         def _center_in_user_box(local_bbox: list[int], cx0: int, cy0: int) -> bool:
             lx_, ly_, lw_, lh_ = local_bbox
             cx = cx0 + lx_ + lw_ / 2
             cy = cy0 + ly_ + lh_ / 2
             return bool(x <= cx <= x + w and y <= cy <= y + h)
 
-        crop_origin = (0, 0)
-        best = None
-        for margin_frac in (0.5, 1.0, 2.0):
-            cx0, cy0, _cx1, _cy1, crop = _crop_with_margin(margin_frac)
-            try:
-                faces = det.detect(crop)
-            except Exception as e:
-                log.error(
-                    "face_redraw_detect_failed",
-                    face_id=face_id,
-                    margin=margin_frac,
-                    error=str(e),
-                )
-                raise HTTPException(status_code=500, detail=f"detect failed: {e}") from e
-            # Prefer faces whose center sits inside the user's drawn rect;
-            # within those, take the highest det_score. Falling back to all
-            # detected faces (without the centered filter) is dangerous —
-            # we'd happily lock onto whoever's standing next to the target.
-            centered = [f for f in faces if _center_in_user_box(f.bbox, cx0, cy0)]
-            if centered:
-                centered.sort(key=lambda f: f.det_score, reverse=True)
-                best = centered[0]
-                crop_origin = (cx0, cy0)
-                break
-            log.info(
-                "face_redraw_widening_crop",
-                face_id=face_id,
-                margin=margin_frac,
-                n_faces_in_crop=len(faces),
-            )
-        if best is None:
+        # (margin, dx-fraction-of-w, dy-fraction-of-h) — 7 attempts.
+        attempts: list[tuple[float, float, float]] = [
+            (0.5, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (2.0, 0.0, 0.0),
+            # Offset sweep at middle margin: shift by ¼ box in each direction
+            # so a slightly-off click can settle onto the true face center.
+            (1.0, 0.25, 0.0),
+            (1.0, -0.25, 0.0),
+            (1.0, 0.0, 0.25),
+            (1.0, 0.0, -0.25),
+        ]
+
+        # Collect every detection across attempts; pick the global best by
+        # det_score at the end. Each candidate carries its source crop origin
+        # so the final bbox can be translated back to image coords.
+        # The semaphore wraps all 7 forwards so a single redraw counts as
+        # one slot — releasing between attempts would let another redraw
+        # interleave on the GPU and double the wall-clock for both.
+        candidates: list[tuple[float, Any, int, int]] = []
+        with app.state.face_detector_sem:
+            for margin_frac, dx_frac, dy_frac in attempts:
+                sx_off = int(round(w * dx_frac))
+                sy_off = int(round(h * dy_frac))
+                cx0, cy0, crop = _crop_around(x + sx_off, y + sy_off, margin_frac)
+                try:
+                    faces = det.detect(crop)
+                except Exception as e:
+                    log.error(
+                        "face_redraw_detect_failed",
+                        face_id=face_id,
+                        margin=margin_frac,
+                        dx_frac=dx_frac,
+                        dy_frac=dy_frac,
+                        error=str(e),
+                    )
+                    raise HTTPException(status_code=500, detail=f"detect failed: {e}") from e
+                for f in faces:
+                    if _center_in_user_box(f.bbox, cx0, cy0):
+                        candidates.append((float(f.det_score), f, cx0, cy0))
+
+        if not candidates:
             raise HTTPException(
                 status_code=422,
                 detail="no face found inside the redrawn box; widen it or pick a clearer crop",
             )
-        cx0, cy0 = crop_origin
+        # Highest det_score wins. We don't average / merge — a single
+        # high-confidence detection is more reliable than a Frankenstein
+        # blend of mediocre ones.
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        best_score, best, cx0, cy0 = candidates[0]
+        log.info(
+            "face_redraw_local_optimum",
+            face_id=face_id,
+            n_candidates=len(candidates),
+            best_score=best_score,
+            attempts_run=len(attempts),
+        )
         lx, ly, lw, lh = best.bbox
         # Translate back to image (DETECT_MAX_SIDE) coords.
         new_bbox = [int(cx0 + lx), int(cy0 + ly), int(lw), int(lh)]

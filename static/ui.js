@@ -362,12 +362,14 @@
   }
   function navLightbox(delta) {
     if (!state.viewIds.length) return;
+    if (bboxEditState) exitBboxRedrawMode(true);
     const n = state.viewIds.length;
     state.viewIndex = ((state.viewIndex + delta) % n + n) % n;
     showCurrentLightbox();
     writeHashRef();
   }
   function closeLightbox() {
+    if (bboxEditState) exitBboxRedrawMode(true);
     state.lightboxOpen = false;
     $("lightbox").classList.remove("show");
     closeFaceNameForm();
@@ -688,6 +690,7 @@
     }
     document.removeEventListener("keydown", onBboxEditKey, true);
     document.removeEventListener("pointermove", onEditPointerMove);
+    document.removeEventListener("pointerup", onEditPointerUp);
     bboxEditState = null;
     if (restoreOverlays) {
       state.facesVisible = true;

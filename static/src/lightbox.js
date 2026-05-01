@@ -311,6 +311,12 @@ function preloadNeighbors(idx) {
 
 export function navLightbox(delta) {
   if (!state.viewIds.length) return;
+  // Exit any in-progress bbox edit BEFORE swapping the image — otherwise
+  // the editBox keeps its old coords against the new photo, the user
+  // would submit a bbox in the wrong coord space, and the endpoint would
+  // 422 with "no face found" (or, worse, accidentally rewrite the wrong
+  // face if the coords happen to align).
+  if (bboxEditState) exitBboxRedrawMode(true);
   const n = state.viewIds.length;
   state.viewIndex = ((state.viewIndex + delta) % n + n) % n;
   showCurrentLightbox();
@@ -318,6 +324,9 @@ export function navLightbox(delta) {
 }
 
 export function closeLightbox() {
+  // Same reasoning as navLightbox: tear edit mode down so its toolbar +
+  // global keydown listener don't leak past the lightbox close.
+  if (bboxEditState) exitBboxRedrawMode(true);
   state.lightboxOpen = false;
   $('lightbox').classList.remove('show');
   closeFaceNameForm();
@@ -735,6 +744,11 @@ function exitBboxRedrawMode(restoreOverlays) {
   // Listener was added with capture: true → must be removed with the same flag.
   document.removeEventListener('keydown', onBboxEditKey, true);
   document.removeEventListener('pointermove', onEditPointerMove);
+  // Defensive: pointerup is `{once: true}` so it normally self-removes,
+  // but if the user is still holding pointerdown when edit mode tears
+  // down (e.g. Cancel button click while dragging) the listener would
+  // outlive its purpose. Removing here is harmless if it already fired.
+  document.removeEventListener('pointerup', onEditPointerUp);
   bboxEditState = null;
   if (restoreOverlays) {
     state.facesVisible = true;
