@@ -33,7 +33,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | # | Item | Status | Effort | Notes |
 |---|---|---|---|---|
 | 14 | Vectorized cosine for bulk attach | 🟢 | 1 h | one `(N, D) @ (D, M)` matmul; ~50× faster than the per-face Python loop |
-| 15 | Identity `n_samples` cap for blend | ⬜ | 0.5 h | cap at e.g. 200 in the centroid-blend math (keep raw counter for display); lets identities slowly drift as the person ages |
+| 15 | Identity `n_samples` cap for blend | 🟢 | 0.5 h | `IDENTITY_SAMPLE_CAP=200` applied at every blend site (`cluster_faces`, `cluster_orphan_faces`, `attach_face_to_best_identity`, `merge_face_identities`); raw `n_samples` counter preserved for display |
 | 16 | `cluster_assignments.distance` metric coherence | ⬜ | 4 h | mixes Euclidean (UMAP) and cosine (manual). Either normalize to z-score within cluster or add a `distance_kind` column |
 | 17 | `face_corrections` retention compactor | 🟢 | 0.5 h | `phototag faces corrections-compact [--apply]` collapses to one row per face_id (most-recent wins); mirrors the dedup the sticky pass does anyway |
 | 18 | Sticky-pass scan budget | 🟢 | 0.5 h | SQL filter to `action IN ('named','unassigned')`; per-face dedup tightened so `verified` rows can't mask older `named` |
@@ -89,19 +89,43 @@ Specs aligned: 02 (Python 3.14), 03 (v5/v6/v7 schema), 09 (full CLI),
 
 ## Picking the next sprint
 
-Lowest risk, highest direct user value (~half a day each):
+Eight items remain (⬜ above). Grouped by ROI on the daily flow:
 
-- **#2** — top-K suggestions on click. Today the only auto-attach signal is
-  re-detect or the bulk CLI. Showing the cosine-ranked top-3 on click makes
-  every "I know who this is, the model probably does too" interaction one
-  button instead of a typed name.
-- **#9** — validate-and-advance. Pairs with the just-shipped N key to make
-  bulk-validation a few-second loop per photo.
-- **#15** — `n_samples` cap. Tiny code change; meaningful when identities
-  have been around for years and a 5-photo recluster shouldn't shift the
-  centroid back.
-- **#17** — corrections compactor. Pure housekeeping; keeps the sticky pass
-  fast as the audit log grows.
+**Quick polish** (~half a day each):
+- **#16** — distance-metric coherence. UI sorts cluster members by
+  `face_cluster_assignments.distance` but the column mixes Euclidean
+  (UMAP) and cosine-derived (manual). Either normalize per-cluster or
+  add a `distance_kind` column. Cosmetic until you start sorting by it.
 
-The bigger swing items (#5 hard-negative mining, #7 constrained HDBSCAN,
-#22 XMP, #23 categories) each warrant their own focused day.
+**Matching quality** (1 day each):
+- **#4** — per-identity threshold tuning. Use the per-attach sim
+  distributions we now collect to raise `auto_verify_threshold` for
+  high-variance identities (kids growing, glasses on/off).
+- **#12** — re-cluster preview members. The dry-run already returns the
+  cluster IDs; surface the ~5 faces nearest each centroid in a UI
+  expander before persisting.
+
+**v2 leftovers** (1 day each):
+- **#22** — XMP sidecar writer. `phototag xmp write/clean` via exiftool;
+  makes tags portable to digiKam / Lightroom.
+- **#23** — categories + tag/cluster mapping (see `08-xmp-categories.md`).
+  Pairs with #22.
+
+**Bigger swing** (~2 days each):
+- **#7** — constrained HDBSCAN (tier-3 sticky). Semi-supervised cluster
+  pass that consumes both `named` and `unassigned` corrections as
+  must-link / cannot-link constraints. Best-quality clustering
+  improvement; new dependency.
+- **#13** — drag-to-redraw bbox. Per-image bbox edit + re-embed via
+  insightface. Largest UX upside but heaviest impl.
+
+**Infra** (independent track):
+- **#24** — CI pipeline. GitHub Actions: ruff + mypy + pytest -m "not
+  slow"; nightly slow run.
+- **#25** — JS bundling / module split. `static/ui.js` is past 1500
+  lines; esbuild + module split before the next big UI feature.
+
+Recommended next pick if you want one half-day item: **#16** (cleans up
+a long-standing inconsistency that will start mattering as the UI grows
+sort/filter by distance). For a focused day: **#22** XMP writer (the
+last v2 leftover that affects everyday use).
