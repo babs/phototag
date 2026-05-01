@@ -58,12 +58,17 @@
   <div class="info" id="lightbox-info"></div>
 </div>
 <div id="face-name-form" class="face-name-form" style="display:none;">
-  <input id="face-name-input" type="text" placeholder="name this person…" autocomplete="off">
-  <button id="face-name-save">save</button>
-  <button id="face-view-person" title="view this person's photos" style="display:none;">view</button>
-  <button id="face-wrong" title="this face was clustered with the wrong person" style="display:none;">wrong</button>
-  <button id="face-delete" title="not a face / delete row">delete</button>
-  <button id="face-name-cancel">×</button>
+  <div class="row">
+    <input id="face-name-input" type="text" placeholder="name this person…" autocomplete="off">
+    <button id="face-name-save" title="save (Enter)">save</button>
+  </div>
+  <div class="row actions">
+    <button id="face-view-person" title="view this person's photos (V)" style="display:none;">view <span class="key">V</span></button>
+    <button id="face-wrong" title="this face was clustered with the wrong person (W)" style="display:none;">wrong <span class="key">W</span></button>
+    <button id="face-delete" title="not a face / delete row (D)">delete <span class="key">D</span></button>
+    <span class="spacer"></span>
+    <button id="face-name-cancel" title="close (Esc)">close <span class="key">Esc</span></button>
+  </div>
 </div>
 <script src="/static/ui.js?v={{ version }}" defer></script>
 </body>

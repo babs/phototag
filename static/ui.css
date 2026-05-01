@@ -108,12 +108,16 @@
   .face-name-form {
     position: fixed; z-index: 200; background: #222; color: #fff;
     padding: 8px; border-radius: 4px; box-shadow: 0 6px 20px rgba(0,0,0,0.5);
-    display: flex; gap: 6px;
+    display: flex; flex-direction: column; gap: 6px; min-width: 320px;
   }
+  .face-name-form .row { display: flex; gap: 6px; align-items: center; }
+  .face-name-form .row.actions button { font-size: 12px; padding: 2px 8px; }
+  .face-name-form .spacer { flex: 1; }
   .face-name-form input {
     border: 1px solid #555; background: #111; color: #fff;
-    padding: 4px 6px; border-radius: 3px; font-size: 13px; width: 200px;
+    padding: 4px 6px; border-radius: 3px; font-size: 13px; flex: 1;
   }
+  .face-name-form .key { opacity: 0.6; font-size: 11px; margin-left: 4px; }
   /* tag search dropdown */
   .ts-wrap { position: relative; display: block; }
   .ts-drop {

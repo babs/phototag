@@ -670,12 +670,36 @@ $('tag-input').addEventListener('keydown', (e) => {
   }
 });
 document.addEventListener('keydown', (e) => {
-  const open = $('lightbox').classList.contains('show');
-  if (!open) return;
-  // Don't intercept while typing in the face-name form.
-  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
-  if (e.key === 'Escape') closeLightbox();
-  else if (e.key === 'f' || e.key === 'F') { e.preventDefault(); toggleFaceOverlays(); }
+  const lightboxOpen = $('lightbox').classList.contains('show');
+  const formOpen = $('face-name-form').style.display !== 'none';
+  if (!lightboxOpen && !formOpen) return;
+
+  // Typing in the rename input → only Esc/Enter, handled by the input listener.
+  if (formOpen && document.activeElement === $('face-name-input')) return;
+
+  if (e.key === 'Escape') {
+    if (formOpen) { e.preventDefault(); closeFaceNameForm(); }
+    else closeLightbox();
+    return;
+  }
+
+  // Form-specific shortcuts (only when the action's button is visible).
+  if (formOpen) {
+    const click = (id) => {
+      const btn = $(id);
+      if (btn && btn.style.display !== 'none' && !btn.disabled) {
+        e.preventDefault();
+        btn.click();
+      }
+    };
+    if (e.key === 'w' || e.key === 'W') { click('face-wrong'); return; }
+    if (e.key === 'd' || e.key === 'D') { click('face-delete'); return; }
+    if (e.key === 'v' || e.key === 'V') { click('face-view-person'); return; }
+    return;  // suppress lightbox shortcuts while form is open
+  }
+
+  // Lightbox shortcuts (form not open).
+  if (e.key === 'f' || e.key === 'F') { e.preventDefault(); toggleFaceOverlays(); }
   else if (e.key === 'ArrowLeft' || e.key === 'PageUp' || e.key === 'k') { e.preventDefault(); navLightbox(-1); }
   else if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === 'j' || e.key === ' ') { e.preventDefault(); navLightbox(1); }
 });
