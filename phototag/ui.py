@@ -74,6 +74,12 @@ class ClusterBindRequest(BaseModel):
     cluster_id: int
 
 
+class BboxRedrawRequest(BaseModel):
+    # bbox in DETECT_MAX_SIDE-resized coords, matching the storage format used
+    # by `faces.detect()` and the face overlay render math.
+    bbox: list[int]
+
+
 def _store(app: FastAPI) -> Store:
     s = getattr(app.state, "store", None)
     if s is None:
@@ -737,6 +743,188 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             s.delete_face(face_id)
         log.info("face_deleted", face_id=face_id)
         return {"deleted": face_id}
+
+    @app.post("/api/faces/{face_id}/redraw-bbox")
+    def api_redraw_bbox(face_id: int, body: BboxRedrawRequest) -> dict[str, Any]:
+        """Replace a face's geometry + embedding by re-running insightface
+        on a user-drawn crop. (#13 — drag-to-redraw bbox)
+
+        The bbox arrives in DETECT_MAX_SIDE-resized coords (same coord space
+        as the stored bbox and the lightbox overlay). We:
+          1. Load the source image, EXIF-transpose, thumbnail to DETECT_MAX_SIDE
+             so the user's bbox is in the right coord system.
+          2. Crop the user's region (clamped to image bounds).
+          3. Run the existing FaceDetector on the crop. RetinaFace re-aligns
+             whatever face it finds; ArcFace produces a fresh embedding.
+          4. Pick the highest-`det_score` face inside the crop. If none, 422
+             so the JS can keep the old bbox visible and surface the message.
+          5. Translate the local bbox back into image coords (offset by the
+             crop origin), update the row, evict the cached face thumb.
+
+        Cluster assignment stays untouched on purpose — the identity link
+        survives a bbox tweak. If the new embedding ends up far from the
+        centroid, the next attach / verify pass will catch it.
+        """
+        from PIL import Image as _Image
+        from PIL import ImageOps as _ImageOps
+
+        from .faces import DETECT_MAX_SIDE, FaceDetector
+
+        s = _store(app)
+        face = s.get_face(face_id)
+        if face is None:
+            raise HTTPException(status_code=404, detail="face not found")
+        if not body.bbox or len(body.bbox) != 4:
+            raise HTTPException(status_code=400, detail="bbox must be [x, y, w, h]")
+        meta = s.get_image(int(face["image_id"]))
+        if meta is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        src_path = s.absolute_path(meta["path"])
+        if not src_path.exists():
+            raise HTTPException(status_code=404, detail="file missing on disk")
+
+        # Lazy-load detector once per process (mirrors api_redetect_faces).
+        det = app.state.face_detector
+        if det is None:
+            with app.state.face_detector_lock:
+                det = app.state.face_detector
+                if det is None:
+                    settings = load_settings()
+                    det = FaceDetector(settings.models_dir, device=settings.device)
+                    app.state.face_detector = det
+
+        try:
+            with _Image.open(src_path) as raw:
+                raw.load()
+                resized = _ImageOps.exif_transpose(raw).convert("RGB")
+        except Exception as e:
+            log.error("face_redraw_open_failed", path=str(src_path), error=str(e))
+            raise HTTPException(status_code=500, detail=f"open failed: {e}") from e
+        # Match the same thumbnail step the detector applies internally so
+        # the bbox we received (DETECT_MAX_SIDE-space) lines up with the
+        # image we crop from.
+        resized.thumbnail((DETECT_MAX_SIDE, DETECT_MAX_SIDE))
+
+        x, y, w, h = (int(c) for c in body.bbox)
+        # Clamp to image bounds. A drag near the edge can produce a bbox
+        # that extends slightly past the rendered image; PIL would happily
+        # crop blank pixels which gives RetinaFace nothing to work with.
+        W, H = resized.size
+        x = max(0, min(x, W - 1))
+        y = max(0, min(y, H - 1))
+        w = max(1, min(w, W - x))
+        h = max(1, min(h, H - y))
+        if w < 24 or h < 24:
+            # 24 px is the practical floor for RetinaFace at this resolution;
+            # below that detection collapses to noise and we'd return junk.
+            raise HTTPException(status_code=422, detail="bbox too small (need ≥24×24)")
+
+        # Pad the crop so RetinaFace has context — it expects faces to sit
+        # inside a frame that includes some shoulders / hair / background.
+        # A tight 25 % margin (the original #13 default) frequently produced
+        # empty detections on near-edge or square crops. We try 50 % first
+        # and double the margin up to 200 % if RetinaFace still finds
+        # nothing. Larger margins risk picking up a NEIGHBORING face, which
+        # the centered-in-user-box filter below guards against.
+        def _crop_with_margin(margin_frac: float) -> tuple[int, int, int, int, Image.Image]:
+            mx = int(round(w * margin_frac))
+            my = int(round(h * margin_frac))
+            cx0 = max(0, x - mx)
+            cy0 = max(0, y - my)
+            cx1 = min(W, x + w + mx)
+            cy1 = min(H, y + h + my)
+            return cx0, cy0, cx1, cy1, resized.crop((cx0, cy0, cx1, cy1))
+
+        # User's drawn rect is the "intended" target — any face whose
+        # CENTER falls inside it is what they meant; faces whose centers
+        # land elsewhere in the padded crop are rejected so we don't pick
+        # up a neighbor when the margin balloons.
+        def _center_in_user_box(local_bbox: list[int], cx0: int, cy0: int) -> bool:
+            lx_, ly_, lw_, lh_ = local_bbox
+            cx = cx0 + lx_ + lw_ / 2
+            cy = cy0 + ly_ + lh_ / 2
+            return bool(x <= cx <= x + w and y <= cy <= y + h)
+
+        crop_origin = (0, 0)
+        best = None
+        for margin_frac in (0.5, 1.0, 2.0):
+            cx0, cy0, _cx1, _cy1, crop = _crop_with_margin(margin_frac)
+            try:
+                faces = det.detect(crop)
+            except Exception as e:
+                log.error(
+                    "face_redraw_detect_failed",
+                    face_id=face_id,
+                    margin=margin_frac,
+                    error=str(e),
+                )
+                raise HTTPException(status_code=500, detail=f"detect failed: {e}") from e
+            # Prefer faces whose center sits inside the user's drawn rect;
+            # within those, take the highest det_score. Falling back to all
+            # detected faces (without the centered filter) is dangerous —
+            # we'd happily lock onto whoever's standing next to the target.
+            centered = [f for f in faces if _center_in_user_box(f.bbox, cx0, cy0)]
+            if centered:
+                centered.sort(key=lambda f: f.det_score, reverse=True)
+                best = centered[0]
+                crop_origin = (cx0, cy0)
+                break
+            log.info(
+                "face_redraw_widening_crop",
+                face_id=face_id,
+                margin=margin_frac,
+                n_faces_in_crop=len(faces),
+            )
+        if best is None:
+            raise HTTPException(
+                status_code=422,
+                detail="no face found inside the redrawn box; widen it or pick a clearer crop",
+            )
+        cx0, cy0 = crop_origin
+        lx, ly, lw, lh = best.bbox
+        # Translate back to image (DETECT_MAX_SIDE) coords.
+        new_bbox = [int(cx0 + lx), int(cy0 + ly), int(lw), int(lh)]
+        # Translate landmarks too if present (insightface returns absolute
+        # coords inside the crop).
+        new_landmarks: list[list[float]] | None
+        if best.landmarks:
+            new_landmarks = [[float(cx0 + p[0]), float(cy0 + p[1])] for p in best.landmarks]
+        else:
+            new_landmarks = None
+
+        with s.transaction():
+            s.update_face_bbox_and_embedding(
+                face_id,
+                bbox=new_bbox,
+                embedding=best.embedding,
+                det_score=float(best.det_score),
+                landmarks=new_landmarks,
+            )
+
+        # Evict the cached face thumb so the next /face-thumb/{id} re-renders
+        # from the new bbox. Best-effort; thumb regeneration is idempotent.
+        thumb = FACE_THUMB_CACHE / f"{face_id}.jpg"
+        try:
+            thumb.unlink(missing_ok=True)
+        except Exception as e:
+            log.warning("face_thumb_evict_failed", face_id=face_id, error=str(e))
+
+        log.info(
+            "face_bbox_redrawn",
+            face_id=face_id,
+            old_bbox=face["bbox"],
+            new_bbox=new_bbox,
+            det_score=float(best.det_score),
+        )
+        return {
+            "face_id": face_id,
+            "bbox": new_bbox,
+            "det_score": float(best.det_score),
+            # `verified=1` is forced by `update_face_bbox_and_embedding`;
+            # surface it so the JS doesn't have to re-fetch the face row to
+            # re-render without the suspect badge.
+            "verified": 1,
+        }
 
     @app.post("/api/faces/{face_id}/unassign")
     def api_unassign_face(face_id: int) -> dict[str, Any]:

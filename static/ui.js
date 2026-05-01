@@ -78,6 +78,7 @@
     bindLightboxRefs: () => bindLightboxRefs,
     closeFaceNameForm: () => closeFaceNameForm,
     closeLightbox: () => closeLightbox,
+    enterBboxRedrawMode: () => enterBboxRedrawMode,
     isFaceFormOpen: () => isFaceFormOpen,
     makeTile: () => makeTile,
     navLightbox: () => navLightbox,
@@ -375,6 +376,10 @@
   function renderFaceOverlays() {
     const img = $("lightbox-img");
     const layer = $("face-layer");
+    if (bboxEditState) {
+      _relayoutEditBox();
+      return;
+    }
     layer.innerHTML = "";
     if (!state.facesVisible || !state.lightboxFaces.length) return;
     if (!img.naturalWidth) return;
@@ -420,6 +425,273 @@
         onFaceClicked(f, e.clientX, e.clientY);
       };
       layer.appendChild(box);
+    }
+  }
+  function _bboxClamp(b, naturalW, naturalH) {
+    let [x, y, w, h] = b.map((n) => Math.round(n));
+    x = Math.max(0, Math.min(x, naturalW - 1));
+    y = Math.max(0, Math.min(y, naturalH - 1));
+    w = Math.max(24, Math.min(w, naturalW - x));
+    h = Math.max(24, Math.min(h, naturalH - y));
+    return [x, y, w, h];
+  }
+  function enterBboxRedrawMode(face) {
+    if (!face || !Array.isArray(face.bbox) || face.bbox.length !== 4) return;
+    const img = $("lightbox-img");
+    if (!img.naturalWidth) return;
+    const layer = $("face-layer");
+    layer.innerHTML = "";
+    state.facesVisible = false;
+    const infoBar = $("lightbox-info");
+    const previousInfoDisplay = infoBar ? infoBar.style.display : null;
+    if (infoBar) infoBar.style.display = "none";
+    const toolbar = document.createElement("div");
+    toolbar.id = "bbox-edit-toolbar";
+    toolbar.className = "info";
+    toolbar.style.background = "rgba(0,0,0,0.85)";
+    toolbar.style.display = "flex";
+    toolbar.style.gap = "10px";
+    toolbar.style.alignItems = "center";
+    toolbar.style.justifyContent = "center";
+    toolbar.innerHTML = `
+    <span>redraw bbox \u2014 drag corners to resize, drag inside to move</span>
+    <button id="bbox-edit-save" type="button" style="background:#22c55e;color:#fff;border:0;border-radius:4px;padding:3px 10px;cursor:pointer;">save (Enter)</button>
+    <button id="bbox-edit-cancel" type="button" style="background:#52525b;color:#fff;border:0;border-radius:4px;padding:3px 10px;cursor:pointer;">cancel (Esc)</button>
+  `;
+    if (infoBar && infoBar.parentNode) {
+      infoBar.parentNode.insertBefore(toolbar, infoBar);
+    } else {
+      $("lightbox").appendChild(toolbar);
+    }
+    void img.getBoundingClientRect();
+    const editBox = document.createElement("div");
+    editBox.className = "face-box";
+    editBox.style.borderColor = "#22c55e";
+    editBox.style.background = "rgba(34,197,94,0.18)";
+    editBox.style.borderWidth = "3px";
+    editBox.style.cursor = "move";
+    editBox.style.zIndex = "50";
+    const handlePositions = [
+      { key: "nw", x: 0, y: 0, cursor: "nwse-resize" },
+      { key: "ne", x: 1, y: 0, cursor: "nesw-resize" },
+      { key: "sw", x: 0, y: 1, cursor: "nesw-resize" },
+      { key: "se", x: 1, y: 1, cursor: "nwse-resize" }
+    ];
+    for (const h of handlePositions) {
+      const dot = document.createElement("div");
+      dot.className = "bbox-handle";
+      dot.dataset.handle = h.key;
+      dot.style.position = "absolute";
+      dot.style.width = "14px";
+      dot.style.height = "14px";
+      dot.style.background = "#22c55e";
+      dot.style.border = "2px solid #fff";
+      dot.style.borderRadius = "50%";
+      dot.style.boxSizing = "border-box";
+      dot.style.left = h.x * 100 + "%";
+      dot.style.top = h.y * 100 + "%";
+      dot.style.transform = "translate(-50%, -50%)";
+      dot.style.cursor = h.cursor;
+      dot.style.zIndex = "51";
+      editBox.appendChild(dot);
+    }
+    layer.appendChild(editBox);
+    bboxEditState = {
+      faceId: face.id,
+      bbox: face.bbox.slice(),
+      naturalW: img.naturalWidth,
+      naturalH: img.naturalHeight,
+      sx: 1,
+      sy: 1,
+      editBox,
+      toolbar,
+      infoBar,
+      previousInfoDisplay,
+      drag: null
+    };
+    _relayoutEditBox();
+    requestAnimationFrame(_relayoutEditBox);
+    requestAnimationFrame(() => requestAnimationFrame(_relayoutEditBox));
+    editBox.addEventListener("pointerdown", onEditPointerDown);
+    for (const dot of editBox.querySelectorAll(".bbox-handle")) {
+      dot.addEventListener("pointerdown", onEditPointerDown);
+    }
+    $("bbox-edit-save").onclick = () => commitBboxRedraw().catch((e) => alert("save failed: " + e.message));
+    $("bbox-edit-cancel").onclick = () => exitBboxRedrawMode(true);
+    document.addEventListener("keydown", onBboxEditKey, true);
+  }
+  function drawEditBox() {
+    if (!bboxEditState) return;
+    const { bbox, sx, sy, editBox } = bboxEditState;
+    const [x, y, w, h] = bbox;
+    editBox.style.left = x * sx + "px";
+    editBox.style.top = y * sy + "px";
+    editBox.style.width = w * sx + "px";
+    editBox.style.height = h * sy + "px";
+  }
+  function _relayoutEditBox() {
+    if (!bboxEditState) return;
+    const img = $("lightbox-img");
+    const layer = $("face-layer");
+    if (!img || !img.naturalWidth) return;
+    const sx = img.clientWidth / img.naturalWidth;
+    const sy = img.clientHeight / img.naturalHeight;
+    layer.style.left = img.offsetLeft + "px";
+    layer.style.top = img.offsetTop + "px";
+    layer.style.width = img.clientWidth + "px";
+    layer.style.height = img.clientHeight + "px";
+    bboxEditState.sx = sx;
+    bboxEditState.sy = sy;
+    drawEditBox();
+  }
+  function onEditPointerDown(e) {
+    if (!bboxEditState) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const handle = e.target.dataset && e.target.dataset.handle;
+    bboxEditState.drag = {
+      mode: handle ? `resize-${handle}` : "move",
+      startX: e.clientX,
+      startY: e.clientY,
+      startBbox: bboxEditState.bbox.slice()
+    };
+    if (e.target.setPointerCapture) {
+      try {
+        e.target.setPointerCapture(e.pointerId);
+      } catch (_) {
+      }
+    }
+    document.addEventListener("pointermove", onEditPointerMove);
+    document.addEventListener("pointerup", onEditPointerUp, { once: true });
+  }
+  function onEditPointerMove(e) {
+    if (!bboxEditState || !bboxEditState.drag) return;
+    const { drag, sx, sy, naturalW, naturalH } = bboxEditState;
+    const dxPx = e.clientX - drag.startX;
+    const dyPx = e.clientY - drag.startY;
+    const dx = dxPx / sx;
+    const dy = dyPx / sy;
+    let [x, y, w, h] = drag.startBbox;
+    if (drag.mode === "move") {
+      x += dx;
+      y += dy;
+    } else if (drag.mode === "resize-nw") {
+      x += dx;
+      y += dy;
+      w -= dx;
+      h -= dy;
+    } else if (drag.mode === "resize-ne") {
+      y += dy;
+      w += dx;
+      h -= dy;
+    } else if (drag.mode === "resize-sw") {
+      x += dx;
+      w -= dx;
+      h += dy;
+    } else if (drag.mode === "resize-se") {
+      w += dx;
+      h += dy;
+    }
+    bboxEditState.bbox = _bboxClamp([x, y, w, h], naturalW, naturalH);
+    drawEditBox();
+  }
+  function onEditPointerUp() {
+    if (!bboxEditState) return;
+    bboxEditState.drag = null;
+    document.removeEventListener("pointermove", onEditPointerMove);
+  }
+  function onBboxEditKey(e) {
+    if (!bboxEditState) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      exitBboxRedrawMode(true);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      commitBboxRedraw().catch((err) => alert("save failed: " + err.message));
+    }
+  }
+  async function commitBboxRedraw() {
+    if (!bboxEditState) return;
+    const { faceId, bbox, toolbar } = bboxEditState;
+    let savedToolbarHTML = null;
+    let saveBtn = null;
+    let cancelBtn = null;
+    if (toolbar) {
+      savedToolbarHTML = toolbar.innerHTML;
+      saveBtn = toolbar.querySelector("#bbox-edit-save");
+      cancelBtn = toolbar.querySelector("#bbox-edit-cancel");
+      if (saveBtn) saveBtn.disabled = true;
+      if (cancelBtn) cancelBtn.disabled = true;
+      toolbar.innerHTML = `
+      <span style="display:inline-block;width:14px;height:14px;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:bbox-spin 0.8s linear infinite;"></span>
+      <span>submitted \u2014 refining face position (this can take a few seconds)\u2026</span>
+    `;
+      if (!document.getElementById("bbox-spin-keyframes")) {
+        const style = document.createElement("style");
+        style.id = "bbox-spin-keyframes";
+        style.textContent = "@keyframes bbox-spin { to { transform: rotate(360deg); } }";
+        document.head.appendChild(style);
+      }
+    }
+    if (bboxEditState.editBox) {
+      bboxEditState.editBox.style.pointerEvents = "none";
+      bboxEditState.editBox.style.opacity = "0.7";
+    }
+    let result;
+    try {
+      result = await api(`/api/faces/${faceId}/redraw-bbox`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bbox })
+      });
+    } catch (e) {
+      console.warn("redraw-bbox failed", { faceId, bbox, error: String(e) });
+      if (toolbar && savedToolbarHTML !== null) {
+        toolbar.innerHTML = savedToolbarHTML;
+        if (bboxEditState && bboxEditState.editBox) {
+          bboxEditState.editBox.style.pointerEvents = "";
+          bboxEditState.editBox.style.opacity = "";
+        }
+        const sBtn = toolbar.querySelector("#bbox-edit-save");
+        const cBtn = toolbar.querySelector("#bbox-edit-cancel");
+        if (sBtn) sBtn.onclick = () => commitBboxRedraw().catch((err) => alert("save failed: " + err.message));
+        if (cBtn) cBtn.onclick = () => exitBboxRedrawMode(true);
+      }
+      throw e;
+    }
+    const idx = (state.lightboxFaces || []).findIndex((f) => f.id === faceId);
+    if (idx >= 0) {
+      state.lightboxFaces[idx] = {
+        ...state.lightboxFaces[idx],
+        bbox: result.bbox,
+        det_score: result.det_score,
+        // Server forced verified=1 on redraw — pull it through so the
+        // overlay drops the dashed "suspect" border immediately.
+        verified: result.verified ?? state.lightboxFaces[idx].verified
+      };
+    }
+    exitBboxRedrawMode(false);
+    state.facesVisible = true;
+    renderFaceOverlays();
+  }
+  function exitBboxRedrawMode(restoreOverlays) {
+    if (!bboxEditState) return;
+    if (bboxEditState.toolbar && bboxEditState.toolbar.parentNode) {
+      bboxEditState.toolbar.parentNode.removeChild(bboxEditState.toolbar);
+    }
+    if (bboxEditState.infoBar) {
+      bboxEditState.infoBar.style.display = bboxEditState.previousInfoDisplay || "";
+    }
+    document.removeEventListener("keydown", onBboxEditKey, true);
+    document.removeEventListener("pointermove", onEditPointerMove);
+    bboxEditState = null;
+    if (restoreOverlays) {
+      state.facesVisible = true;
+      renderFaceOverlays();
     }
   }
   function toggleFaceOverlays() {
@@ -610,6 +882,12 @@
       closeFaceNameForm();
       showCurrentLightbox();
     };
+    $("face-redraw").onclick = () => {
+      if (!pendingFace) return;
+      const target = pendingFace;
+      closeFaceNameForm();
+      enterBboxRedrawMode(target);
+    };
     $("face-verify").onclick = async () => {
       if (!pendingFace) return;
       const verifiedId = pendingFace.id;
@@ -698,14 +976,18 @@
   function isFaceFormOpen() {
     return $("face-name-form")?.style.display !== "none";
   }
-  var lightboxToken, _faceObserver, pendingFace, writeHashRef, toggleTagRef;
+  var lightboxToken, _faceObserver, bboxEditState, pendingFace, writeHashRef, toggleTagRef;
   var init_lightbox = __esm({
     "static/src/lightbox.js"() {
       init_state();
       init_api();
       lightboxToken = 0;
       _faceObserver = null;
-      window.addEventListener("resize", renderFaceOverlays);
+      window.addEventListener("resize", () => {
+        renderFaceOverlays();
+        _relayoutEditBox();
+      });
+      bboxEditState = null;
       pendingFace = null;
       writeHashRef = () => {
       };
@@ -2008,6 +2290,10 @@
         }
         if (e.key === "x" || e.key === "X") {
           click("face-drop-dups");
+          return;
+        }
+        if (e.key === "b" || e.key === "B") {
+          click("face-redraw");
           return;
         }
         return;

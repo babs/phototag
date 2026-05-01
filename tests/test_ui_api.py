@@ -880,3 +880,71 @@ def test_categories_bind_unknown_cluster_returns_404(client: TestClient) -> None
     assert r.status_code == 201
     r = client.post("/api/categories/family/rules/cluster", json={"cluster_id": 99999})
     assert r.status_code == 404
+
+
+# ---- /api/faces/{id}/redraw-bbox validation paths (#13) -----------------
+# These tests cover the branches that don't need the insightface model
+# (face_id / image / file existence checks + bbox shape + bbox-too-small).
+# Anything past those branches requires the detector and is exercised
+# end-to-end via curl in dev — see specs/16-improvement-plan.md row 13.
+
+
+def test_redraw_bbox_unknown_face_id_404(client: TestClient) -> None:
+    r = client.post("/api/faces/99999/redraw-bbox", json={"bbox": [0, 0, 50, 50]})
+    assert r.status_code == 404
+    assert "face not found" in r.json()["detail"]
+
+
+def test_redraw_bbox_malformed_bbox_400(client: TestClient, seeded_db: Path) -> None:
+    """bbox must be a 4-element list [x, y, w, h]."""
+    # face_id=1 exists in the seeded DB.
+    r = client.post("/api/faces/1/redraw-bbox", json={"bbox": [1, 2, 3]})
+    assert r.status_code == 400
+    assert "bbox" in r.json()["detail"]
+    r = client.post("/api/faces/1/redraw-bbox", json={"bbox": []})
+    assert r.status_code == 400
+
+
+def test_redraw_bbox_image_row_missing_404(client: TestClient, seeded_db: Path) -> None:
+    """If a face's image row was deleted but the face row survived, redraw
+    surfaces 404 'image not found' instead of crashing on the file-open.
+    The schema enforces FK so we have to disable PRAGMA foreign_keys for
+    the duration of the surgery — this models the historical-data shape
+    where a row was orphaned by a process that bypassed the FK (e.g. a
+    raw SQL maintenance script)."""
+    s = Store(seeded_db)
+    s.conn.execute("PRAGMA foreign_keys = OFF")
+    s.conn.execute("UPDATE faces SET image_id = 99999 WHERE id = 1")
+    s.conn.execute("PRAGMA foreign_keys = ON")
+    s.conn.commit()
+    s.close()
+    r = client.post("/api/faces/1/redraw-bbox", json={"bbox": [0, 0, 50, 50]})
+    assert r.status_code == 404
+    assert "image not found" in r.json()["detail"]
+
+
+def test_redraw_bbox_file_missing_on_disk_404(client: TestClient, seeded_db: Path) -> None:
+    """seeded_db points face 1 at `/tmp/a.jpg` which has no actual JPEG;
+    `redraw-bbox` must distinguish this from face/image-row missing."""
+    r = client.post("/api/faces/1/redraw-bbox", json={"bbox": [0, 0, 50, 50]})
+    assert r.status_code == 404
+    assert "file missing on disk" in r.json()["detail"]
+
+
+def test_redraw_bbox_too_small_422(client: TestClient, seeded_db: Path, tmp_path: Path) -> None:
+    """A bbox below the 24×24 RetinaFace floor returns 422 before we even
+    spin up the detector."""
+    from PIL import Image as _Image
+
+    # Materialize a real JPEG so we get past the file-existence check and
+    # hit the bbox-too-small branch.
+    img_path = tmp_path / "real.jpg"
+    _Image.new("RGB", (200, 200), (10, 20, 30)).save(img_path, format="JPEG")
+    s = Store(seeded_db)
+    s.conn.execute("UPDATE images SET path = ? WHERE id = 1", (str(img_path),))
+    s.conn.commit()
+    s.close()
+
+    r = client.post("/api/faces/1/redraw-bbox", json={"bbox": [10, 10, 20, 20]})
+    assert r.status_code == 422
+    assert "bbox too small" in r.json()["detail"]

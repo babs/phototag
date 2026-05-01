@@ -892,6 +892,57 @@ class Store:
             d["bbox"] = None
         return d
 
+    def update_face_bbox_and_embedding(
+        self,
+        face_id: int,
+        *,
+        bbox: list[int],
+        embedding: np.ndarray,
+        det_score: float,
+        landmarks: list[list[float]] | None = None,
+    ) -> None:
+        """Replace a face's geometry + embedding in place. Used by the
+        drag-to-redraw flow (#13) and any other path that re-computes a face
+        from a fresh crop.
+
+        Caller is responsible for invalidating the face thumb cache (a stale
+        crop on disk would otherwise survive until the user clears the cache
+        directory). The cluster assignment stays untouched on purpose — the
+        identity link survives a bbox tweak; if the new embedding ends up
+        too far from the centroid, the next attach pass / verify pass will
+        catch it.
+
+        `verified` is forced to 1: a successful redraw means RetinaFace
+        re-detected a face inside the user-drawn region, AND the user
+        explicitly chose that crop, so the heuristic-verify outcome
+        (whatever it was on the previous geometry) no longer applies.
+        Without this, the JS overlay would render the redrawn box as
+        "suspect" (dashed border) any time RetinaFace returned a det_score
+        below 0.65 on the tighter crop — misleading because the bbox is
+        now human-confirmed.
+        """
+        v = np.ascontiguousarray(embedding, dtype=np.float32)
+        self.conn.execute(
+            """
+            UPDATE faces
+               SET bbox_json = ?,
+                   embedding = ?,
+                   dim       = ?,
+                   det_score = ?,
+                   landmarks_json = ?,
+                   verified  = 1
+             WHERE id = ?
+            """,
+            (
+                json.dumps([int(c) for c in bbox]),
+                v.tobytes(),
+                int(v.shape[0]),
+                float(det_score),
+                json.dumps(landmarks) if landmarks is not None else None,
+                int(face_id),
+            ),
+        )
+
     def count_faces(self) -> int:
         return int(self.conn.execute("SELECT COUNT(*) AS n FROM faces").fetchone()["n"])
 

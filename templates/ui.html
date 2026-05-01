@@ -75,6 +75,7 @@
       <tr><td><kbd>G</kbd></td><td>go to this person's photos</td></tr>
       <tr><td><kbd>W</kbd></td><td>wrong cluster — un-assign this face</td></tr>
       <tr><td><kbd>X</kbd></td><td>drop other dups of this name on this photo</td></tr>
+      <tr><td><kbd>B</kbd></td><td>redraw the bounding box (drag corners; Enter saves, Esc cancels)</td></tr>
       <tr><td><kbd>D</kbd></td><td>delete this face row (false positive)</td></tr>
       <tr><td><kbd>Enter</kbd></td><td>save the typed name (auto-validates)</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>close popover</td></tr>
@@ -106,11 +107,17 @@
     <button id="face-name-save" title="save (Enter)">save</button>
   </div>
   <div id="face-suggestions" class="face-suggestions" style="display:none;"></div>
+  <!-- Two-line action layout: positive identity actions on top, corrective
+       + destructive + close on the bottom. Cleaner visual hierarchy than
+       cramming 7 buttons into one row. -->
   <div class="row actions">
     <button id="face-view-person" title="go to this person's photos (G)" style="display:none;">go <span class="key">G</span></button>
     <button id="face-verify" title="validate this detection (V)" style="display:none;">validate <span class="key">V</span></button>
     <button id="face-drop-dups" title="drop other faces with the same name on this image (X)" style="display:none;">drop dups <span class="key">X</span></button>
+  </div>
+  <div class="row actions">
     <button id="face-wrong" title="this face was clustered with the wrong person (W)" style="display:none;">wrong <span class="key">W</span></button>
+    <button id="face-redraw" title="redraw the bounding box (B)">redraw <span class="key">B</span></button>
     <button id="face-delete" title="not a face / delete row (D)">delete <span class="key">D</span></button>
     <span class="spacer"></span>
     <button id="face-name-cancel" title="close (Esc)">close <span class="key">Esc</span></button>

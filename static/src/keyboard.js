@@ -55,6 +55,7 @@ export function wireKeyboardHandlers() {
       if (e.key === 'g' || e.key === 'G') { click('face-view-person'); return; }
       if (e.key === 'v' || e.key === 'V') { click('face-verify'); return; }
       if (e.key === 'x' || e.key === 'X') { click('face-drop-dups'); return; }
+      if (e.key === 'b' || e.key === 'B') { click('face-redraw'); return; }
       return;  // suppress lightbox shortcuts while form is open
     }
 
