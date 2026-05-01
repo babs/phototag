@@ -78,13 +78,14 @@ outputs.
 
 | file | what it covers |
 |---|---|
-| `tests/test_cli.py` | `version`, `--help`, `prune` dry-run + `--apply`, `list --tag`, `stats --kind`, `export json/csv` round-trip, `doctor` size-mismatch detect + `--fix`, `backup` atomic snapshot |
+| `tests/test_cli.py` | `version`, `--help`, `prune` dry-run + `--apply`, `list --tag`, `stats --kind`, `export json/csv` round-trip, `doctor` size-mismatch detect + `--fix`, `backup` atomic snapshot, `category add/rm/list/map/unmap` CLI round-trip, `faces corrections-compact` |
 | `tests/test_scanner.py` | `iter_images` extension filter, `hash_file` determinism |
 | `tests/test_store.py` | schema migrations, image upsert, tag round-trip, embedding round-trip, `delete_image` cascade through tags / faces / embeddings |
-| `tests/test_store_faces.py` | face inserts / runs / clusters / identities, search by persons, group rename, cluster centroid, unassign, purge, delete-with-cluster-size-decrement, `attach_face_to_best_identity` (success / no-match / dim-mismatch / margin / cannot-link / noise-detach), `auto_attach_orphans` (dry-run + persist + image_id-in-audit + cannot-link), edge gallery |
+| `tests/test_store_faces.py` | face inserts / runs / clusters / identities, search by persons, group rename, cluster centroid, unassign, purge, delete-with-cluster-size-decrement, `attach_face_to_best_identity` (success / no-match / dim-mismatch / margin / cannot-link / noise-detach), `auto_attach_orphans` (dry-run + persist + image_id-in-audit + cannot-link), edge gallery, **per-identity threshold (Welford folder, threshold widening, attach-records-sim)**, **tier-3 constraint edge derivation + matrix surgery**, **categories union + cluster/tag rule cascade** |
 | `tests/test_exif.py` | `_to_jsonable`, `_to_decimal`, `_parse_exif_dt`, full extract on a piexif-injected JPEG |
 | `tests/test_faces_verify.py` | heuristic `verify_faces` dry-run + `--apply`, threshold tuning |
-| `tests/test_ui_api.py` | FastAPI `TestClient` — every endpoint: healthz, runs, tags autocomplete, search by tag / person, image faces, manual face naming (verify + auto-detach + cannot-link), group rename + split + merge, by-name merged view + edge view, only_unnamed sidebar, validate-named bulk + drop-dups, redetect IoU preservation, delete face, drop-all + drop-unidentified, corrections audit log, suggest top-K, lib-wide drop yes-required, rename skips noise, triage queue, `APP_API_TOKEN[_FILE]` middleware (constant-time compare + hot rotation) |
+| `tests/test_xmp.py` | (skips when `exiftool` not installed) `write_sidecar` round-trip + idempotence + rewrite-on-content-change, `clean_sidecar`, `phototag xmp write/clean` CLI dry-run + `--apply`, `lr:HierarchicalSubject` emission for tag→category and cluster→category rules |
+| `tests/test_ui_api.py` | FastAPI `TestClient` — every endpoint: healthz, runs, tags autocomplete, search by tag / person, image faces, manual face naming (verify + auto-detach + cannot-link), group rename + split + merge, by-name merged view + edge view, only_unnamed sidebar, validate-named bulk + drop-dups, redetect IoU preservation, delete face, drop-all + drop-unidentified, corrections audit log, suggest top-K, lib-wide drop yes-required, rename skips noise, triage queue, `APP_API_TOKEN[_FILE]` middleware (constant-time compare + hot rotation), **categories CRUD + tag/cluster rule round-trip + 404 on unknown targets**, **redraw-bbox validation paths (face/image/file 404, malformed-bbox 400, too-small 422)** |
 
 Heavy paths still untested (covered by `slow` integration runs or manual):
 
@@ -95,6 +96,16 @@ Heavy paths still untested (covered by `slow` integration runs or manual):
 - `phototag/reporting.py` — pending; needs sample image fixtures.
 - `phototag/pipeline.py` (orchestration) — same fixture story as clustering.
 
-CI: no GitHub Actions yet (escalated as item #24 in `specs/16-improvement-plan.md`).
-`make test-cov` is the local entry point; the xml output is shaped for codecov.io
-upload when that lands.
+CI: shipped — `.github/workflows/ci.yml`. Two jobs:
+
+- **`fast`** (push / PR): `uv sync --extra ui --group dev`, then the
+  project pre-commit stack (ruff lint + format + mypy + secrets +
+  pyupgrade) followed by `pytest -m "not slow" --cov=phototag`.
+- **`slow`** (cron `17 3 * * *`): `uv sync --extra all --group dev`,
+  then `pytest -m slow` with a 60-min timeout. Tolerates pytest exit
+  code 5 (no slow tests yet) so the nightly stays green until model-
+  backed tests are added.
+
+`make test-cov` remains the local entry point; coverage output is shaped
+for codecov.io upload (not yet wired). Verified locally with
+`act -j fast` / `act schedule -j slow`.

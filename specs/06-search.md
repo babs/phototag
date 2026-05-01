@@ -24,7 +24,7 @@ Free-text query → ranked images. Powered by CLIP embeddings already cached for
 
 ## Filters
 
-Combine semantic score with metadata filters:
+The shipped CLI surface is intentionally minimal — `phototag query "TEXT" [--limit N] [--embedder NAME]`. Combining semantic score with date / tag / cluster filters is the obvious next step but isn't implemented yet; the natural shape would be:
 
 ```
 phototag query "x-ray of a hand" \
@@ -34,7 +34,7 @@ phototag query "x-ray of a hand" \
   --limit 50
 ```
 
-When filters are present, apply in SQL first (cheap), then re-rank by cosine on the reduced set.
+with filters applied in SQL first (cheap) and cosine re-ranking on the reduced set. The UI's `/api/search` endpoint already supports the tag + person filters — bridging that to the CLI is mostly plumbing.
 
 ## Score thresholds
 

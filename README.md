@@ -126,6 +126,18 @@ Live status table: [`specs/16-improvement-plan.md`](specs/16-improvement-plan.md
   rule. Cluster rules win over tag rules. The same surface is editable
   in-app via the sidebar **categories** view. See
   [`specs/08-xmp-categories.md`](specs/08-xmp-categories.md).
+- `phototag info IMAGE_PATH` — inspect tags + metadata for one image
+  (DB row + EXIF) without launching the UI.
+- `phototag exif-backfill [--limit N]` — extract EXIF from disk into
+  `images.exif_json` for legacy DB rows that pre-date EXIF capture.
+- `phototag geo-tag [--limit N]` — reverse-geocode EXIF GPS into
+  `city` + `country` tags (`model_name=geo_v1`). Offline via
+  `reverse_geocoder` ([geo] extra).
+- `phototag rename CLUSTER_ID [LABEL]` — set or clear `label_user` on
+  one cluster (omit `LABEL` to clear).
+- `phototag rename-bulk JSON_PATH` — apply `{cluster_id: label_user}`
+  from a JSON file in one transaction.
+- `phototag version` — print the installed version.
 
 ## Install
 
@@ -304,7 +316,7 @@ end-of-file-fixer, check-yaml/toml.
 - [`00-overview.md`](specs/00-overview.md) — goal, non-goals, version split
 - [`01-architecture.md`](specs/01-architecture.md) — components, data flow
 - [`02-stack.md`](specs/02-stack.md) — tech choices, rationale
-- [`03-data-model.md`](specs/03-data-model.md) — SQLite schema (v1–v8)
+- [`03-data-model.md`](specs/03-data-model.md) — SQLite schema (v1–v11)
 - [`04-pipeline-tagging.md`](specs/04-pipeline-tagging.md) — scan/tag/persist
 - [`05-clustering.md`](specs/05-clustering.md) — UMAP + HDBSCAN + naming
 - [`06-search.md`](specs/06-search.md) — semantic search

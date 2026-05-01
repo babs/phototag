@@ -271,7 +271,7 @@ read it to seed soft constraints:
 | `unassigned` (face X removed from cluster Y) | cannot-link X with the centroid that becomes Y's successor |
 | `deleted` | not used (row is gone) |
 
-Constraints are applied at two tiers (tier-3 still pending). Plan, in
+Constraints are applied at three tiers, all shipped. Plan, in
 order of cost:
 
 1. **Sticky-label post-pass** (cheap; ~1 day) — *shipped*. After
@@ -294,13 +294,24 @@ order of cost:
    identities, so the same wrong name can never win the argmax or count
    toward the top-2 ambiguity check. The bulk path reports
    `cannot_link_skipped` (count of forbidden (face, identity) pairs).
-3. **Constrained HDBSCAN (tier-3 sticky)** — *pending*. Use a
-   semi-supervised clusterer (e.g. `constrained-clustering`) where `named`
-   faces become must-links and `unassigned` pairs become cannot-links at
-   the clustering layer itself. Best quality, more work, more dependencies.
+3. **Constrained HDBSCAN (tier-3 sticky)** — *shipped, opt-in*.
+   `cluster_faces(..., tier3_constraints=True)` (CLI:
+   `phototag faces cluster --tier3-constraints`). Hand-rolled, no new
+   dependency: precompute a Euclidean distance matrix on the UMAP-
+   reduced space, then surgically rewrite must-link pairs (anchor-spoke
+   per `named` name, O(n) edges) → 0.0 and cannot-link pairs
+   (`unassigned` against a labelled cluster vs every other face named
+   that label, capped at 50k edges) → 99.0. HDBSCAN runs with
+   `metric='precomputed'`. **Caveat**: distance-matrix surgery is not a
+   hard guarantee — HDBSCAN's mutual-reachability is transitive, so two
+   cannot-link points can still end up in the same cluster via a third
+   bridging point. The post-pass tier-1 (replay named) + tier-2
+   (cannot-link inside the attach helper) still run on top — tier-3 is
+   a *during-clustering* nudge that lifts average quality, the
+   post-passes provide the strict enforcement.
 
-The current corrections table is the substrate for any of these — actions
-already logged today are usable by the future pass.
+The corrections table is the substrate for all three tiers — every
+action already logged today is consumed by the appropriate tier.
 
 ## UI
 
@@ -355,6 +366,7 @@ This feature processes biometric data. Hard rules:
 ```
 phototag faces detect          [--limit N] [--force] [--i-understand]
 phototag faces cluster         [--min-size 3] [--min-samples 2]
+                               [--tier3-constraints]
 phototag faces verify          [--min-score 0.65] [--min-area 1024] [--apply]
 phototag faces refine-noise    [--min-size 3] [--min-samples 2] [--persist]
 phototag faces auto-attach     [--threshold 0.5] [--auto-verify-threshold 0.7]
@@ -364,9 +376,8 @@ phototag faces unname          CLUSTER_ID
 phototag faces clear-noise-labels
 phototag faces corrections     [--action ACT] [--face-id N] [--limit N]
 phototag faces corrections-compact [--apply]
-phototag faces stats
+phototag faces stats           [--per-identity]
 phototag faces purge           [--keep-identities] [--yes]
-phototag faces report          [--out report-faces/]
 ```
 
 ## Performance expectations

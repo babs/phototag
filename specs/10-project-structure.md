@@ -11,16 +11,18 @@ phototag/
 ├── .secrets.baseline
 ├── phototag/
 │   ├── __init__.py
-│   ├── cli.py                # typer entry — every command (scan, embed,
-│   │                         #   cluster, report, prune, doctor, backup,
-│   │                         #   list, stats, export, query, info, rename,
-│   │                         #   rename-bulk, exif-backfill, geo-tag, serve,
+│   ├── cli.py                # typer entry — every command (version, scan,
+│   │                         #   embed, cluster, report, prune, doctor,
+│   │                         #   backup, list, stats, export, query, info,
+│   │                         #   rename, rename-bulk, exif-backfill, geo-tag,
+│   │                         #   serve, xmp write/clean,
+│   │                         #   category add/rm/list/map/unmap,
 │   │                         #   faces detect/cluster/verify/refine-noise/
 │   │                         #     auto-attach/name/unname/clear-noise-labels/
 │                             #     corrections/corrections-compact/purge/stats)
 │   ├── scanner.py            # filesystem walk (os.walk, no symlink follow) + xxhash
 │   ├── pipeline.py           # batch orchestration (scan_and_tag, embed_all)
-│   ├── store.py              # SQLite — migrations (v1–v8), thread-local conns
+│   ├── store.py              # SQLite — migrations (v1–v11), thread-local conns
 │   │                         #   + write lock, every query
 │   ├── settings.py           # pydantic-settings; APP_* env vars
 │   ├── config.py             # ClusterConfig, ClipConfig, RamConfig, image extensions
@@ -83,7 +85,7 @@ run `make js-build` (or `make js-watch` during development) to regenerate
 never need `npm install`.
 
 Schema migrations live inline in `phototag/store.py:MIGRATIONS` (a list
-of SQL strings; numbered v1–v8 in code comments). Each migration is
+of SQL strings; numbered v1–v11 in code comments). Each migration is
 applied atomically inside its own `executescript`; the `meta(key,value)`
 table records `schema_version`.
 

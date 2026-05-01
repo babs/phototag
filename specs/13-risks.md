@@ -13,7 +13,7 @@
 ## Privacy
 
 - **Faces** — RAM does not perform face recognition. v2 adds `phototag faces detect|cluster|name` via `InsightFace` (RetinaFace + ArcFace), **opt-in only**, in a separate command, gated by `--i-understand` on first run. See [`15-faces.md`](15-faces.md). Embeddings never leave the machine; `phototag faces purge` wipes everything. Never enabled by default in `scan`.
-- **GPS** — extracted into `images.exif_json`. If the user shares the DB, GPS leaks. Provide `phototag scrub --gps` to drop GPS fields.
+- **GPS** — extracted into `images.exif_json`. If the user shares the DB, GPS leaks. A scrub command (`phototag scrub --gps`) was planned but not shipped; for now, the workaround is `sqlite3 phototag.db "UPDATE images SET exif_json = json_remove(exif_json, '$.gps') WHERE exif_json IS NOT NULL"` before sharing.
 
 ## Idempotence
 
@@ -44,8 +44,8 @@
 ## Operational
 
 - **Disk full mid-scan** — fail fast, no silent retry. WAL mode keeps DB consistent.
-- **Concurrent CLI invocations** — DB lock. Detect, exit code 10. Don't try fancy multi-writer.
-- **Model download on first run** — slow, network-dependent. Cache under `data/models/`. Provide `phototag models download` for pre-warming.
+- **Concurrent CLI invocations** — SQLite `busy_timeout=5000` absorbs brief contention; past that the second writer raises `sqlite3.OperationalError: database is locked` and exits non-zero. Single-writer assumption holds; we don't try fancy multi-writer.
+- **Model download on first run** — slow, network-dependent. Cache under `data/models/` (configurable via `APP_MODELS_DIR`). RAM++ weights must be downloaded manually from the [recognize-anything upstream](https://github.com/xinyu1205/recognize-anything); InsightFace and open_clip auto-download on first use. A pre-warming command (`phototag models download`) was planned but not shipped — the auto-download on first inference run is sufficient in practice.
 
 ## Unknowns to resolve early
 

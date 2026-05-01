@@ -32,21 +32,21 @@ Defer-until-needed extras that depend on v1 already exposing the corpus.
 | 10 | `list` / `stats` / `export` | 0.5 d | **done** |
 | 11 | EXIF extraction | 0.5 d | **done** — `phototag exif-backfill`, GPS persisted |
 | 12 | Cluster rename workflow | 0.5 d | **done** — `phototag rename` / `rename-bulk` + UI |
-| 13 | Test suite hardening | 0.5 d | partial — 58 tests; cluster path still uncovered |
+| 13 | Test suite hardening | 0.5 d | **done** — 104 tests / 8 skipped (xmp behind `exiftool` skipif). Heavy ML paths (`pipeline.scan_and_tag`, `cluster_faces` end-to-end) still need FakeTagger/FakeEmbedder fixtures — see `specs/14-testing.md`. |
 | 13b | `prune` (stale-row cleanup) | 0.5 d | **done** — `phototag prune --apply` |
 
 ## v2 — Productivity (~3 days)
 
 | # | Task | Effort | Status |
 |---|---|---|---|
-| 14 | XMP writer | 0.5 d | **pending** — needs exiftool / pyexiv2 design |
-| 15 | Categories + tag/cluster mapping | 1 d | **pending** — schema + UI surface |
+| 14 | XMP writer | 0.5 d | **done** — `phototag xmp write/clean` via `exiftool` subprocess (`phototag/xmp.py`). Idempotent (mtime + subject-set check), atomic tmp→rename. `--include-people` adds validated face labels. See [`08-xmp-categories.md`](08-xmp-categories.md). |
+| 15 | Categories + tag/cluster mapping | 1 d | **done** — v11 migration adds `categories`, `tag_category_map`, `cluster_categories`. CLI: `phototag category add/rm/list/map/unmap`. UI: third sidebar view + workspace rule editor. Drives `lr:HierarchicalSubject` in XMP via `Store.categories_for_image()`. |
 | 16 | Faces — detect + embed (`[face]` extra) | 0.5 d | **done** |
 | 17 | Faces — cluster + identity carry-over (Hungarian) | 0.5 d | **done** — sample-weighted centroid update |
 | 18 | Faces — UI panel + lightbox overlay | 0.5 d | **done** — popover, validate, drop-dups, dup hint |
 | 19 | Faces — orphan re-cluster (dry-run + persist) | 0.5 d | **done** — `phototag faces refine-noise` |
-| 20 | Faces — sticky-label correction post-pass | 0.5 d | **done — tier 1** (named/unassigned replay) |
-| 21 | Optional API token (single-user shared secret) | 0.25 d | **done** — `APP_API_TOKEN` env |
+| 20 | Faces — sticky-label correction post-pass | 0.5 d | **done — all 3 tiers**. Tier 1 (named/unassigned replay), tier 2 (cannot-link in attach helper), tier 3 (must-link / cannot-link surgery on the precomputed UMAP-Euclidean distance matrix; `phototag faces cluster --tier3-constraints`). |
+| 21 | Optional API token (single-user shared secret) | 0.25 d | **done** — `APP_API_TOKEN` env + `APP_API_TOKEN_FILE` for hot rotation |
 
 Faces details in [`15-faces.md`](15-faces.md). **Opt-in** via `--i-understand` on first run; processes biometric data, never leaves the machine.
 

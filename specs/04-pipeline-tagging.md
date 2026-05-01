@@ -11,13 +11,20 @@
 
 ## Batching
 
-- Inference: 8–32 images per batch (GPU-bound). Batch size auto-detected from VRAM, override via `--batch-size`.
-- I/O (decode + hash): multiprocess pool sized to CPU count.
-- Producer/consumer: I/O pool feeds a bounded queue; GPU worker drains it.
+- Inference: 8–32 images per batch (GPU-bound). Default `--batch-size 16`; tune via the flag (`scan --batch-size N`).
+- I/O (decode + hash): `ThreadPoolExecutor` sized to `decode_workers`
+  (default = `max(2, batch_size)`; override via `--decode-workers` on
+  `scan`/`embed`). Threads suffice because the hot path is PIL +
+  xxhash, both releasing the GIL on file/CPU-bound work — multiprocess
+  overhead is unjustified on a single-machine corpus.
+- Producer/consumer: a background producer thread fills a bounded
+  queue (`queue_depth=2` batches) so decode overlaps the GPU forward —
+  observed ~50 % → ~100 % GPU duty cycle on the legacy 980 Ti when
+  prefetching is active.
 
 ## Hashing
 
-`xxhash` or `blake3` over file bytes. Used for change detection — not cryptographic. Hash + mtime together: hash detects content change, mtime catches the rare case of zero-byte truncation matching an empty hash.
+`xxhash` over file bytes (`_HASH_CHUNK = 1 MiB` reads). Used for change detection — not cryptographic. Hash + mtime together: hash detects content change, mtime catches the rare case of zero-byte truncation matching an empty hash.
 
 ## Threshold tuning
 
@@ -29,12 +36,13 @@ Re-running `scan` on the same folder is a no-op for unchanged files. Force re-ta
 
 ## Error handling
 
-- Decode failure → log + skip, mark `images.exif_json` with `{"error": "..."}`.
-- Inference OOM → halve batch size, retry once, then crash loudly.
-- Disk full / DB locked → fail fast, no silent retry.
+- Decode failure → log `decode_failed` (path + error) and skip the image; the row is not upserted, the `failed` counter increments. We do NOT write a synthetic exif_json with the error — failed rows simply don't exist in the DB until a re-scan succeeds.
+- Inference failure (incl. OOM) → log `tag_batch_failed`, count the whole batch as failed, continue with the next batch. There is no batch-size halving / retry today; a hard OOM crashes the worker and the user re-runs with `--batch-size N/2` manually.
+- Disk full / DB locked → SQLite raises (5 s `busy_timeout` absorbs brief contention); we propagate, no silent retry.
+- Decoder thread errors → caught in `pipeline._prefetch_decoded_batches.producer` and logged as `decode_pipeline_failed`; the consumer sees `_END` so the run finishes with the partial counts instead of hanging.
 
 ## Observability
 
-- Per-run: count scanned / skipped / tagged / failed.
-- Tail log to stderr; `--verbose` for per-image events.
-- Optional `--progress` shows tqdm bar.
+- Per-run: counts of `scanned / skipped / tagged / failed` emitted as `scan_completed` (structlog). Same shape for `embed_all` → `embed_completed`.
+- Tail logs to stderr/stdout via structlog; TTY → console renderer, otherwise JSON.
+- No tqdm — progress is implied by the `scan_filter` / `decode_pipeline_failed` / `embed_started` events. A progress bar would clutter the JSON log channel and isn't worth the dependency for a one-shot CLI.

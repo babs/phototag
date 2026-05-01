@@ -6,32 +6,31 @@ Static HTML output, browsable offline. One report per clustering run.
 
 ### Index page
 
-- 2D UMAP projection (scatter plot, colored by cluster). Pre-rendered PNG/SVG via matplotlib, no JS.
-- Global stats: total images, cluster count, noise size, mean/median/min/max cluster sizes.
-- Table of clusters with: id, auto-label, suggested CLIP label, size, link to detail page.
+- Global stats: total images, cluster count, noise size, per-cluster sizes (read from `clusters.size`).
+- Table of clusters with: id, cluster_no, auto-label, user-label, size, link to detail page.
+- A 2D UMAP projection was originally planned but not shipped — `report` is JS-free static HTML; the FastAPI UI (`phototag serve`) is the interactive surface. Adding a pre-rendered matplotlib scatter is straightforward if the static HTML view becomes worth investing in.
 
 ### Per-cluster page
 
-- Cluster id, auto-label, CLIP-suggested label, size.
-- Top TF-IDF tags (e.g., 10 dominant).
-- Editable user-label field (textarea + JS that POSTs to local API, or generates a JSON snippet to paste back).
-- Grid of 25 thumbnails closest to centroid (256 px JPEG, generated once and cached under `report_assets/`).
-- Click thumbnail → opens original path in OS default app (`file://` link).
+- Cluster id, auto-label (TF-IDF), user-label, cluster_no, size.
+- Grid of up to 25 thumbnails (`THUMB_PER_CLUSTER`), 256 px max side, JPEG q80, EXIF-orientation baked in. Thumbs are content-hashed so renames don't trigger regeneration.
+- Each thumbnail links to the original file via `file://` URI.
 
 ## Generation
 
-- Jinja2 templates under `templates/`.
-- Output: `report/<run_id>/index.html` + `report/<run_id>/cluster_<id>.html` + `report/<run_id>/thumbs/`.
-- Thumbnails generated lazily; reuse across runs when image hash unchanged.
+- Jinja2 templates: `templates/index.html.j2`, `templates/cluster.html.j2`.
+- Output: `<out>/index.html` + `<out>/cluster_<id>.html` + `<out>/thumbs/<sha256(path):16>.jpg` + `<out>/data.json` (machine-readable copy).
+- Default `--out report` (under cwd); `--run-id N` overrides "latest cluster_run".
+- Thumbnails are written once per content hash; re-running `report` reuses them.
 
 ## Renaming clusters
 
-Two modes:
+Two CLI commands (no built-in editor in the static HTML — that lives in the FastAPI UI):
 
-- **Static** — copy displayed JSON `{cluster_id: user_label, ...}` and run `phototag cluster rename --from rename.json`.
-- **Live** (optional) — `phototag report --serve` runs FastAPI locally, textarea POSTs persist `clusters.label_user` immediately.
+- `phototag rename CLUSTER_ID [LABEL]` — set or clear `label_user` on one cluster (omit `LABEL` to clear).
+- `phototag rename-bulk JSON_PATH` — apply `{cluster_id: label_user}` from a JSON file in one transaction.
 
-Static is enough for v1; live mode is a later stretch.
+For interactive editing, run `phototag serve` and use the cluster pane (✏️ button on each cluster).
 
 ## Thumbnail strategy
 

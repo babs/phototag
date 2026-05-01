@@ -37,11 +37,13 @@ phototag query "TEXT" [--limit 30] [--embedder NAME]
 phototag list  --tag NAME [--tag NAME] [--score-min 0.7] [--limit 100] [--format json|tsv]
 phototag stats [--top 50] [--kind label|geo]
 phototag export [--format json|csv] [--out FILE] [--min-score 0.0]
+phototag info  IMAGE_PATH
 phototag prune [--apply] [--limit N]
 phototag doctor [--fix]
 phototag backup [--out PATH]
 phototag rename CLUSTER_ID [LABEL]
 phototag rename-bulk JSON_PATH
+phototag version
 ```
 
 | Command | Purpose |
@@ -54,6 +56,8 @@ phototag rename-bulk JSON_PATH
 | `doctor` | Health-check the DB; flag size mismatches, orphan identities, schema-version drift; `--fix` recomputes safe items |
 | `backup` | Create an SQLite snapshot of the DB (atomic, online; default dst `data/backups/phototag-<UTC-iso>.db`) |
 | `rename` / `rename-bulk` | Bulk-set `clusters.label_user` |
+| `info` | Inspect tags + EXIF + face overlay for one image (DB row + filesystem) |
+| `version` | Print the installed package version |
 
 ## v2 — productivity
 
@@ -62,13 +66,14 @@ phototag xmp write PATH [--threshold 0.7] [--include-people] [--apply]
 phototag xmp clean PATH [--apply]
 
 phototag category add NAME
-phototag category map --tag T   --category C
-phototag category map --cluster N --category C
+phototag category rm  NAME
 phototag category list
-phototag category apply
+phototag category map   --category C   {--tag T | --cluster N}
+phototag category unmap                {--tag T | --cluster N}
 
 phototag faces detect              [--limit N] [--force] [--i-understand]
 phototag faces cluster             [--min-size 3] [--min-samples 2]
+                                   [--tier3-constraints]
 phototag faces verify              [--min-score 0.65] [--min-area 1024] [--apply]
 phototag faces refine-noise        [--min-size 3] [--min-samples 2] [--persist]
 phototag faces auto-attach         [--threshold 0.5] [--auto-verify-threshold 0.7]
@@ -78,10 +83,8 @@ phototag faces unname              CLUSTER_ID
 phototag faces clear-noise-labels
 phototag faces corrections         [--action ACT] [--face-id N] [--limit N]
 phototag faces corrections-compact [--apply]
-phototag faces stats
-phototag faces purge [--keep-identities] [--yes]
-phototag faces stats
-phototag faces report [--out report-faces/]
+phototag faces stats               [--per-identity]
+phototag faces purge               [--keep-identities] [--yes]
 
 phototag exif-backfill [--limit N] [--force]
 phototag geo-tag       [--limit N] [--force]

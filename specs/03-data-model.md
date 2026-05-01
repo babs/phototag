@@ -129,19 +129,32 @@ CREATE TABLE face_identities (
     name TEXT NOT NULL UNIQUE,
     centroid BLOB NOT NULL,
     dim INTEGER NOT NULL,
-    n_samples INTEGER NOT NULL
+    n_samples INTEGER NOT NULL,
+    -- v10: per-identity Welford running stats on the auto-attach cosine
+    -- similarity. Used by `attach_face_to_best_identity` to widen the
+    -- auto-validate band on high-variance identities.
+    sim_n    INTEGER NOT NULL DEFAULT 0,
+    sim_mean REAL    NOT NULL DEFAULT 0.0,
+    sim_M2   REAL    NOT NULL DEFAULT 0.0
 );
 
--- v2
+-- v11
 CREATE TABLE categories (
     id   INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE
 );
 
 CREATE TABLE tag_category_map (
-    tag_id      INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
-    PRIMARY KEY (tag_id, category_id)
+    -- UNIQUE on tag_id: a tag maps to at most one category. Re-mapping
+    -- replaces the previous category via `ON CONFLICT(tag_id) DO UPDATE`.
+    tag_id      INTEGER NOT NULL UNIQUE REFERENCES tags(id) ON DELETE CASCADE,
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE
+);
+
+CREATE TABLE cluster_categories (
+    -- Cluster→category override (highest precedence, beats tag rules).
+    cluster_id  INTEGER NOT NULL UNIQUE REFERENCES face_clusters(id) ON DELETE CASCADE,
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE
 );
 ```
 
@@ -159,7 +172,7 @@ Re-tagging is gated by `(hash, mtime)`. Path changes alone don't trigger re-tagg
 
 ## Migrations
 
-Schema migrations: simple numbered SQL files in `phototag/migrations/`. Apply in order, store `schema_version` in a `meta(key, value)` table.
+Schema migrations live inline in `phototag/store.py:MIGRATIONS` (a list of SQL strings; numbered v1–v11 in code comments). Each is applied atomically inside its own `executescript`; the `meta(key, value)` table records `schema_version`.
 
 ### v9 — `face_cluster_assignments.distance_kind`
 
@@ -169,3 +182,23 @@ UPDATE face_cluster_assignments SET distance_kind = 'euclidean_umap' WHERE dista
 ```
 
 `distance` historically mixed two scales: Euclidean distance in UMAP-reduced space (written by `cluster_faces` / `cluster_orphan_faces`) and `1.0 - cosine_sim` (written by manual / auto-attach paths). Sorting a mixed cluster was meaningless. `distance_kind` makes the scale explicit (`'euclidean_umap'` or `'cosine_dist'`) so the UI can format the value correctly. Pre-existing rows came from the UMAP path, so the backfill is safe.
+
+### v10 — `face_identities` Welford stats
+
+```sql
+ALTER TABLE face_identities ADD COLUMN sim_n    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE face_identities ADD COLUMN sim_mean REAL    NOT NULL DEFAULT 0.0;
+ALTER TABLE face_identities ADD COLUMN sim_M2   REAL    NOT NULL DEFAULT 0.0;
+```
+
+Per-identity running statistics on the auto-attach cosine similarity. Folded by `Store.record_identity_attach_sim` after each successful `attach_face_to_best_identity`. Used to widen the auto-validate band by `2σ` for high-variance identities (kid drift, lighting swings) — see `specs/16-improvement-plan.md` row #4.
+
+### v11 — categories + tag/cluster mapping
+
+```sql
+CREATE TABLE categories          (id, name UNIQUE);
+CREATE TABLE tag_category_map    (tag_id UNIQUE FK→tags, category_id FK→categories);
+CREATE TABLE cluster_categories  (cluster_id UNIQUE FK→face_clusters, category_id FK→categories);
+```
+
+User category vocabulary + the two rule sources that drive `lr:HierarchicalSubject` in XMP sidecars (cluster wins over tag per `08-xmp-categories.md`). `Store.categories_for_image` resolves the union; `phototag xmp write --apply` materializes `category|subject` entries.
