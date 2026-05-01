@@ -755,6 +755,26 @@ class Store:
             )
         self.conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
 
+    def delete_all_faces_for_image(self, image_id: int) -> int:
+        """Drop every face row for the image; bulk-update affected cluster sizes."""
+        rows = self.conn.execute(
+            """
+            SELECT fca.cluster_id AS cid, COUNT(*) AS n
+            FROM face_cluster_assignments fca
+            JOIN faces f ON f.id = fca.face_id
+            WHERE f.image_id = ?
+            GROUP BY fca.cluster_id
+            """,
+            (image_id,),
+        ).fetchall()
+        for r in rows:
+            self.conn.execute(
+                "UPDATE face_clusters SET size = MAX(0, size - ?) WHERE id = ?",
+                (int(r["n"]), int(r["cid"])),
+            )
+        cur = self.conn.execute("DELETE FROM faces WHERE image_id=?", (image_id,))
+        return int(cur.rowcount)
+
     def unassign_face_from_run(self, face_id: int, run_id: int) -> int:
         """Remove this face's cluster assignment(s) within a single run.
 

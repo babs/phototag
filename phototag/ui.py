@@ -235,6 +235,58 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         log.info("face_identity_rename_all", from_=name, to=new, clusters=n)
         return {"renamed": n, "from": name, "to": new}
 
+    @app.delete("/api/images/{image_id}/faces")
+    def api_delete_image_faces(image_id: int) -> dict[str, Any]:
+        """Drop every face on a single image (e.g. crowd / unhelpful detections)."""
+        s = _store(app)
+        if s.get_image(image_id) is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        with s.transaction():
+            n = s.delete_all_faces_for_image(image_id)
+        log.info("image_faces_deleted", image_id=image_id, deleted=n)
+        return {"deleted": n, "image_id": image_id}
+
+    @app.post("/api/images/{image_id}/redetect-faces")
+    def api_redetect_faces(image_id: int) -> dict[str, Any]:
+        """Re-run face detection on a single image. Replaces any existing faces."""
+        from PIL import Image as _Image
+
+        from .faces import MODEL_NAME, FaceDetector
+
+        s = _store(app)
+        meta = s.get_image(image_id)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        src = Path(meta["path"])
+        if not src.exists():
+            raise HTTPException(status_code=404, detail="file missing on disk")
+        # Lazy global detector, kept on app.state so we don't reload weights per call.
+        det = getattr(app.state, "face_detector", None)
+        if det is None:
+            settings = load_settings()
+            det = FaceDetector(settings.models_dir, device=settings.device)
+            app.state.face_detector = det
+        try:
+            with _Image.open(src) as img:
+                img.load()
+                faces = det.detect(img)
+        except Exception as e:
+            log.error("face_redetect_failed", path=str(src), error=str(e))
+            raise HTTPException(status_code=500, detail=f"detect failed: {e}") from e
+        with s.transaction():
+            s.delete_all_faces_for_image(image_id)
+            for f in faces:
+                s.insert_face(
+                    image_id=image_id,
+                    bbox=f.bbox,
+                    det_score=f.det_score,
+                    embedding=f.embedding,
+                    model_name=MODEL_NAME,
+                    landmarks=f.landmarks,
+                )
+        log.info("face_redetected", image_id=image_id, faces=len(faces))
+        return {"image_id": image_id, "faces": len(faces)}
+
     @app.delete("/api/faces/{face_id}")
     def api_delete_face(face_id: int) -> dict[str, Any]:
         """Drop a false-positive face row."""

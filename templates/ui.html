@@ -410,7 +410,13 @@ async function showCurrentLightbox() {
   const tagHtml = info.tags.map(t =>
     `<span class="tag" onclick="toggleTag('${escape(t.name)}'); closeLightbox();">${escape(t.name)} <span class="count">${t.score.toFixed(2)}</span></span>`
   ).join('');
-  $('lightbox-info').innerHTML = `<div>${escape(info.path)} · <a href="${assetUrl('raw', id)}" target="_blank" style="color:#9cf;">open original</a></div>${formatExif(info.exif)}<div class="tags" style="margin-top:6px;">${tagHtml}</div>`;
+  const facesActions = [];
+  if (faces && faces.length > 0) {
+    facesActions.push(`<a href="#" onclick="event.preventDefault(); deleteAllFacesOnImage(${id});" style="color:#fca5a5;">drop ${faces.length} faces</a>`);
+  }
+  facesActions.push(`<a href="#" onclick="event.preventDefault(); redetectFaces(${id});" style="color:#9cf;">re-detect faces</a>`);
+  const facesActionStr = facesActions.length ? ' · ' + facesActions.join(' · ') : '';
+  $('lightbox-info').innerHTML = `<div>${escape(info.path)} · <a href="${assetUrl('raw', id)}" target="_blank" style="color:#9cf;">open original</a>${facesActionStr}</div>${formatExif(info.exif)}<div class="tags" style="margin-top:6px;">${tagHtml}</div>`;
   state.lightboxFaces = faces;
   state.lightboxImage = info;
   // Render once the displayed size is known.
@@ -600,6 +606,29 @@ $('face-name-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') saveFaceName();
   else if (e.key === 'Escape') closeFaceNameForm();
 });
+
+async function deleteAllFacesOnImage(imageId) {
+  if (!confirm('Drop every detected face from this photo? Useful for crowd shots where individual recognition is unhelpful.')) return;
+  try {
+    await api(`/api/images/${imageId}/faces`, { method: 'DELETE' });
+  } catch (e) {
+    alert('failed: ' + e.message); return;
+  }
+  showCurrentLightbox();
+}
+
+async function redetectFaces(imageId) {
+  // Loads the InsightFace model on first call (~5 s), runs detection, replaces faces.
+  $('lightbox-info').innerHTML = '<div>re-detecting faces…</div>';
+  try {
+    await api(`/api/images/${imageId}/redetect-faces`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+    });
+  } catch (e) {
+    alert('failed: ' + e.message); return;
+  }
+  showCurrentLightbox();
+}
 
 async function viewPerson(clusterId) {
   // Pull all photos containing that person; replace the current view with them.
