@@ -665,6 +665,60 @@ class Store:
         row = self.conn.execute("SELECT id FROM face_runs ORDER BY id DESC LIMIT 1").fetchone()
         return int(row["id"]) if row else None
 
+    def list_named_people(self, *, prefix: str | None = None, limit: int = 50) -> list[tuple[str, int]]:
+        """All named-people across all face_runs, with photo count (deduped per image)."""
+        if prefix:
+            cur = self.conn.execute(
+                """
+                SELECT fc.label_user AS name, COUNT(DISTINCT f.image_id) AS n
+                FROM face_clusters fc
+                JOIN face_cluster_assignments fca ON fca.cluster_id = fc.id
+                JOIN faces f ON f.id = fca.face_id
+                WHERE fc.label_user IS NOT NULL AND fc.label_user LIKE ?
+                GROUP BY fc.label_user ORDER BY n DESC LIMIT ?
+                """,
+                (f"{prefix}%", limit),
+            )
+        else:
+            cur = self.conn.execute(
+                """
+                SELECT fc.label_user AS name, COUNT(DISTINCT f.image_id) AS n
+                FROM face_clusters fc
+                JOIN face_cluster_assignments fca ON fca.cluster_id = fc.id
+                JOIN faces f ON f.id = fca.face_id
+                WHERE fc.label_user IS NOT NULL
+                GROUP BY fc.label_user ORDER BY n DESC LIMIT ?
+                """,
+                (limit,),
+            )
+        return [(r["name"], int(r["n"])) for r in cur]
+
+    def search_images_by_persons(self, names: list[str]) -> set[int]:
+        """Image ids containing a face in a cluster named for each of `names` (AND)."""
+        if not names:
+            return set()
+        placeholders = ",".join("?" * len(names))
+        cur = self.conn.execute(
+            f"""
+            SELECT f.image_id, fc.label_user
+            FROM faces f
+            JOIN face_cluster_assignments fca ON fca.face_id = f.id
+            JOIN face_clusters fc ON fc.id = fca.cluster_id
+            WHERE fc.label_user IN ({placeholders})
+            """,
+            names,
+        )
+        by_name: dict[str, set[int]] = {n: set() for n in names}
+        for row in cur:
+            n = row["label_user"]
+            if n in by_name:
+                by_name[n].add(int(row["image_id"]))
+        common: set[int] | None = None
+        for name in names:
+            s = by_name.get(name, set())
+            common = s if common is None else common & s
+        return common or set()
+
     def list_face_clusters(self, run_id: int) -> list[dict[str, Any]]:
         cur = self.conn.execute(
             "SELECT id, cluster_no, size, label_auto, label_user FROM face_clusters "

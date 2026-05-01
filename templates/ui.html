@@ -129,8 +129,16 @@
   }
   .ts-drop .row:hover, .ts-drop .row.active { background: var(--chip-bg); }
   .ts-drop .row.in-filter { color: var(--accent); font-weight: 600; }
+  .ts-drop .row.person { background: #fff7ed; }
+  .ts-drop .row.person:hover, .ts-drop .row.person.active { background: #fde6c4; }
+  .ts-drop .row .kind { font-size: 10px; opacity: 0.7; margin-right: 4px; }
   .ts-drop .row .count { color: var(--muted); font-size: 11px; }
   .ts-drop .empty { padding: 8px 10px; color: var(--muted); font-size: 12px; }
+  .ts-drop .group-label {
+    padding: 4px 10px; font-size: 10px; text-transform: uppercase;
+    color: var(--muted); background: #f6f6f6; letter-spacing: 0.5px;
+  }
+  .filters .person { background: #fde6c4; color: #92400e; }
   /* image lightbox */
   .lightbox {
     position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none;
@@ -217,6 +225,7 @@ const state = {
   clusters: [],
   selectedCluster: null,
   activeTags: new Set(),
+  activePersons: new Set(),
   // current set of images in the workspace, used by the lightbox for navigation.
   viewIds: [],
   viewIndex: 0,
@@ -563,13 +572,18 @@ async function viewPerson(clusterId) {
 
 function renderActiveFilters() {
   const root = $('active-tags');
-  if (state.activeTags.size === 0) {
+  if (state.activeTags.size === 0 && state.activePersons.size === 0) {
     root.innerHTML = '<span style="color:var(--muted);">none</span>';
     return;
   }
   root.innerHTML = '';
+  state.activePersons.forEach(p => {
+    const el = html(`<span class="tag active person">👤 ${escape(p)} <span class="x">×</span></span>`);
+    el.querySelector('.x').onclick = (e) => { e.stopPropagation(); togglePerson(p); };
+    root.appendChild(el);
+  });
   state.activeTags.forEach(t => {
-    const el = html(`<span class="tag active">${escape(t)} <span class="x" data-tag="${escape(t)}">×</span></span>`);
+    const el = html(`<span class="tag active">${escape(t)} <span class="x">×</span></span>`);
     el.querySelector('.x').onclick = (e) => { e.stopPropagation(); toggleTag(t); };
     root.appendChild(el);
   });
@@ -579,7 +593,15 @@ async function toggleTag(name) {
   if (state.activeTags.has(name)) state.activeTags.delete(name);
   else state.activeTags.add(name);
   renderActiveFilters();
-  if (state.activeTags.size > 0) await runSearch();
+  if (state.activeTags.size + state.activePersons.size > 0) await runSearch();
+  else if (state.selectedCluster) await showCluster(state.selectedCluster);
+}
+
+async function togglePerson(name) {
+  if (state.activePersons.has(name)) state.activePersons.delete(name);
+  else state.activePersons.add(name);
+  renderActiveFilters();
+  if (state.activeTags.size + state.activePersons.size > 0) await runSearch();
   else if (state.selectedCluster) await showCluster(state.selectedCluster);
 }
 
@@ -587,16 +609,22 @@ async function runSearch() {
   const ws = $('workspace');
   ws.innerHTML = '<div class="empty">searching…</div>';
   const tags = Array.from(state.activeTags);
+  const persons = Array.from(state.activePersons);
   const minScore = parseFloat($('min-score').value || '0');
   const params = new URLSearchParams();
   tags.forEach(t => params.append('tag', t));
+  persons.forEach(p => params.append('person', p));
   params.set('min_score', String(minScore));
   params.set('limit', '200');
   if (state.runId != null) params.set('run_id', String(state.runId));
   const results = await api(`/api/search?${params.toString()}`);
   ws.innerHTML = '';
-  ws.appendChild(html(`<h2>${tags.map(escape).join(' + ')}</h2>`));
-  ws.appendChild(html(`<div class="auto">${results.length} matches (score ≥ ${minScore.toFixed(2)})</div>`));
+  const titleParts = [
+    ...persons.map(p => `👤 ${escape(p)}`),
+    ...tags.map(escape),
+  ];
+  ws.appendChild(html(`<h2>${titleParts.join(' + ')}</h2>`));
+  ws.appendChild(html(`<div class="auto">${results.length} matches${tags.length ? ` (score ≥ ${minScore.toFixed(2)})` : ''}</div>`));
   if (!results.length) {
     ws.appendChild(html('<div class="empty">no matches</div>'));
     return;
@@ -629,6 +657,7 @@ $('run-select').addEventListener('change', async (e) => {
 $('min-score').addEventListener('change', () => { if (state.activeTags.size > 0) runSearch(); });
 $('clear-filters').addEventListener('click', () => {
   state.activeTags.clear();
+  state.activePersons.clear();
   renderActiveFilters();
   $('workspace').innerHTML = '<div class="empty">filters cleared</div>';
 });
@@ -639,10 +668,21 @@ let tagDebounce = null;
 
 async function refreshTagDropdown() {
   const q = $('tag-input').value.trim();
-  const url = q.length
-    ? `/api/tags?prefix=${encodeURIComponent(q)}&limit=20`
-    : `/api/tags?limit=20`;
-  const items = await api(url);
+  const tagUrl = q.length
+    ? `/api/tags?prefix=${encodeURIComponent(q)}&limit=15`
+    : `/api/tags?limit=15`;
+  const personUrl = q.length
+    ? `/api/people/names?prefix=${encodeURIComponent(q)}&limit=8`
+    : `/api/people/names?limit=8`;
+  const [tags, people] = await Promise.all([
+    api(tagUrl).catch(() => []),
+    api(personUrl).catch(() => []),
+  ]);
+  // Combine: people first when q is set (more specific), tags first otherwise.
+  const items = [
+    ...people.map(p => ({ kind: 'person', name: p.name, count: p.count })),
+    ...tags.map(t => ({ kind: 'tag', name: t.name, count: t.count })),
+  ];
   tagDropState.items = items;
   tagDropState.active = items.length ? 0 : -1;
   renderTagDropdown();
@@ -657,15 +697,25 @@ function renderTagDropdown() {
   }
   drop.innerHTML = tagDropState.items.map((t, i) => {
     const cls = ['row'];
+    if (t.kind === 'person') cls.push('person');
     if (i === tagDropState.active) cls.push('active');
-    if (state.activeTags.has(t.name)) cls.push('in-filter');
-    return `<div class="${cls.join(' ')}" data-name="${escape(t.name)}">
-      <span>${escape(t.name)}</span><span class="count">${t.count}</span>
+    const inFilter = t.kind === 'person'
+      ? state.activePersons.has(t.name)
+      : state.activeTags.has(t.name);
+    if (inFilter) cls.push('in-filter');
+    const icon = t.kind === 'person' ? '👤' : '#';
+    return `<div class="${cls.join(' ')}" data-kind="${t.kind}" data-name="${escape(t.name)}">
+      <span><span class="kind">${icon}</span>${escape(t.name)}</span><span class="count">${t.count}</span>
     </div>`;
   }).join('');
   drop.classList.add('show');
   drop.querySelectorAll('.row').forEach((row, i) => {
-    row.onmousedown = (e) => { e.preventDefault(); pickTag(tagDropState.items[i].name); };
+    row.onmousedown = (e) => {
+      e.preventDefault();
+      const it = tagDropState.items[i];
+      if (it.kind === 'person') pickPerson(it.name);
+      else pickTag(it.name);
+    };
     row.onmouseenter = () => { tagDropState.active = i; updateActiveRow(); };
   });
 }
@@ -680,6 +730,12 @@ function pickTag(name) {
   toggleTag(name);
   $('tag-input').value = '';
   refreshTagDropdown();  // keep dropdown open showing latest set with new in-filter highlight
+}
+
+async function pickPerson(name) {
+  await togglePerson(name);
+  $('tag-input').value = '';
+  refreshTagDropdown();
 }
 
 function hideTagDropdown() {
@@ -699,8 +755,10 @@ $('tag-input').addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowUp') { e.preventDefault(); tagDropState.active = (tagDropState.active - 1 + max) % max; updateActiveRow(); }
   else if (e.key === 'Enter') {
     e.preventDefault();
-    if (tagDropState.active >= 0) pickTag(tagDropState.items[tagDropState.active].name);
-    else if (e.target.value.trim()) pickTag(e.target.value.trim());
+    if (tagDropState.active >= 0) {
+      const it = tagDropState.items[tagDropState.active];
+      if (it.kind === 'person') pickPerson(it.name); else pickTag(it.name);
+    } else if (e.target.value.trim()) pickTag(e.target.value.trim());
   } else if (e.key === 'Escape') {
     e.target.value = '';
     hideTagDropdown();
@@ -727,6 +785,7 @@ function parseHash() {
     run: p.has('run') ? Number(p.get('run')) : null,
     cluster: p.has('cluster') ? Number(p.get('cluster')) : null,
     tags: p.getAll('tag'),
+    persons: p.getAll('person'),
     minScore: p.has('score') ? parseFloat(p.get('score')) : null,
   };
 }
@@ -737,11 +796,12 @@ function writeHash() {
   if (hashWriteSuspended) return;
   const p = new URLSearchParams();
   if (state.runId != null) p.set('run', String(state.runId));
-  // Tags take precedence in display: if filtering, persist tags+score; otherwise cluster.
-  if (state.activeTags.size > 0) {
+  // Filters (tags + persons) take precedence over a selected cluster.
+  if (state.activeTags.size > 0 || state.activePersons.size > 0) {
+    state.activePersons.forEach(n => p.append('person', n));
     state.activeTags.forEach(t => p.append('tag', t));
     const ms = parseFloat($('min-score').value || '0');
-    if (ms > 0) p.set('score', ms.toFixed(2));
+    if (ms > 0 && state.activeTags.size > 0) p.set('score', ms.toFixed(2));
   } else if (state.selectedCluster != null) {
     p.set('cluster', String(state.selectedCluster));
   }
@@ -753,8 +813,10 @@ async function applyHashState(h) {
   hashWriteSuspended = true;
   try {
     if (h.minScore != null && !Number.isNaN(h.minScore)) $('min-score').value = String(h.minScore);
-    if (h.tags && h.tags.length) {
-      state.activeTags = new Set(h.tags);
+    const hasFilter = (h.tags && h.tags.length) || (h.persons && h.persons.length);
+    if (hasFilter) {
+      state.activeTags = new Set(h.tags || []);
+      state.activePersons = new Set(h.persons || []);
       renderActiveFilters();
       await runSearch();
     } else if (h.cluster != null) {
@@ -778,6 +840,7 @@ window.addEventListener('hashchange', async () => {
   }
   // Reset filters/cluster then re-apply.
   state.activeTags.clear();
+  state.activePersons.clear();
   state.selectedCluster = null;
   document.querySelectorAll('.cluster-row').forEach(r => r.classList.remove('selected'));
   renderActiveFilters();

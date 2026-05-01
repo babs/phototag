@@ -147,16 +147,48 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     @app.get("/api/search")
     def api_search(
         tag: Annotated[list[str] | None, Query()] = None,
+        person: Annotated[list[str] | None, Query()] = None,
         min_score: Annotated[float, Query(ge=0.0, le=1.0)] = 0.0,
         limit: Annotated[int, Query(ge=1, le=500)] = 120,
         run_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        if not tag:
-            return []
         s = _store(app)
-        # Default to the most recent run so we don't return one row per image per run.
+        if not tag and not person:
+            return []
         rid = run_id if run_id is not None else s.latest_cluster_run()
-        return s.search_images_by_tags(tag, min_score=min_score, limit=limit, run_id=rid)
+        person_ids: set[int] | None = s.search_images_by_persons(person) if person else None
+        if person_ids is not None and not person_ids:
+            return []
+        if tag:
+            results = s.search_images_by_tags(tag, min_score=min_score, limit=limit, run_id=rid)
+            if person_ids is not None:
+                results = [r for r in results if r["id"] in person_ids]
+            return results
+        # person-only — synthesize results from the image rows.
+        assert person_ids is not None
+        if not person_ids:
+            return []
+        placeholders = ",".join("?" * len(person_ids))
+        cur = s.conn.execute(
+            f"""
+            SELECT i.id, i.path, NULL AS score,
+                   NULL AS cluster_id, NULL AS cluster_no, NULL AS label_auto,
+                   NULL AS label_user, NULL AS cluster_size
+            FROM images i
+            WHERE i.id IN ({placeholders})
+            ORDER BY i.id
+            LIMIT ?
+            """,
+            [*person_ids, limit],
+        )
+        return [dict(r) for r in cur]
+
+    @app.get("/api/people/names")
+    def api_people_names(
+        prefix: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 30,
+    ) -> list[dict[str, Any]]:
+        return [{"name": n, "count": c} for n, c in _store(app).list_named_people(prefix=prefix, limit=limit)]
 
     @app.get("/api/images/{image_id}")
     def api_image(image_id: int) -> dict[str, Any]:
