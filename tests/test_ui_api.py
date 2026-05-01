@@ -508,6 +508,42 @@ def test_api_token_blocks_unauth(seeded_db: Path, monkeypatch: pytest.MonkeyPatc
         assert c.get("/api/runs?token=wrong").status_code == 401
 
 
+def test_api_token_file_hot_rotation(
+    seeded_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Editing APP_API_TOKEN_FILE rotates the accepted token without restart."""
+    token_file = tmp_path / "token"
+    token_file.write_text("old-token\n")
+    monkeypatch.setenv("APP_API_TOKEN_FILE", str(token_file))
+    monkeypatch.delenv("APP_API_TOKEN", raising=False)
+    app = create_app(db_path=seeded_db)
+    with TestClient(app) as c:
+        # old token works
+        assert c.get("/api/runs", headers={"X-API-Token": "old-token"}).status_code == 200
+        assert c.get("/api/runs", headers={"X-API-Token": "new-token"}).status_code == 401
+        # rotate the file in-place; same process, no restart
+        token_file.write_text("new-token\n")
+        assert c.get("/api/runs", headers={"X-API-Token": "old-token"}).status_code == 401
+        assert c.get("/api/runs", headers={"X-API-Token": "new-token"}).status_code == 200
+
+
+def test_api_token_file_empty_returns_503(
+    seeded_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty token file with no APP_API_TOKEN fallback must 503, not allow through."""
+    token_file = tmp_path / "token"
+    token_file.write_text("")
+    monkeypatch.setenv("APP_API_TOKEN_FILE", str(token_file))
+    monkeypatch.delenv("APP_API_TOKEN", raising=False)
+    app = create_app(db_path=seeded_db)
+    with TestClient(app) as c:
+        # public endpoints still open
+        assert c.get("/healthz").status_code == 200
+        # protected endpoints refuse with 503 (misconfigured) regardless of token
+        assert c.get("/api/runs").status_code == 503
+        assert c.get("/api/runs", headers={"X-API-Token": "anything"}).status_code == 503
+
+
 def test_corrections_logged_on_manual_name(client: TestClient, seeded_db: Path) -> None:
     s = Store(seeded_db)
     img_id = _image_id(s, "/tmp/b.jpg")

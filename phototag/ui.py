@@ -99,6 +99,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     setup_logging(log_level=settings.log_level, json_logs=settings.json_logs)
     db = db_path or settings.db_path
     api_token = settings.api_token or None
+    api_token_file = settings.api_token_file or None
     THUMB_CACHE.mkdir(parents=True, exist_ok=True)
     PREVIEW_CACHE.mkdir(parents=True, exist_ok=True)
     FACE_THUMB_CACHE.mkdir(parents=True, exist_ok=True)
@@ -140,7 +141,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     templates = Jinja2Templates(directory=str(project_root / "templates"))
     app.mount("/static", StaticFiles(directory=str(project_root / "static")), name="static")
 
-    if api_token:
+    if api_token or api_token_file:
         # Lightweight shared-secret guard. Disabled by default (the local-
         # loopback case). When set, every request except the index page,
         # /healthz, /static/* and CORS preflights (OPTIONS) must carry the
@@ -149,12 +150,43 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         #   - ?token=<value> query string (so <img> loads work in the SPA)
         # The token is also injected into the index template so the JS can
         # read it and decorate fetch/asset URLs automatically.
+        #
+        # When `api_token_file` is set, the middleware re-reads the file on
+        # every protected request — editing the file rotates the token
+        # without a restart. Cost is one tiny os.read per request; the
+        # alternative (mtime watch / inotify) is more code for no measurable
+        # win on a single-user local app.
         import secrets as _secrets
 
         from starlette.middleware.base import BaseHTTPMiddleware
 
         _PUBLIC = ("/", "/healthz", "/favicon.ico")
-        _expected_token: str = api_token  # narrow for mypy under closure
+        _static_token: str | None = api_token
+        _token_file: Path | None = api_token_file
+        _last_seen: dict[str, str | None] = {"value": None}
+
+        def _current_token() -> tuple[str | None, str | None]:
+            """Return (token, error). Error is non-None when misconfigured /
+            unreadable; in that case the middleware MUST 503 instead of
+            silently letting the request through."""
+            if _token_file is not None:
+                try:
+                    raw = _token_file.read_text().strip()
+                except OSError as e:
+                    log.error("api_token_file_read_failed", path=str(_token_file), error=str(e))
+                    return None, "auth misconfigured: token file unreadable"
+                if not raw:
+                    if _static_token:
+                        # Empty file but a fallback static token exists — use it.
+                        return _static_token, None
+                    return None, "auth misconfigured: token file empty and no APP_API_TOKEN"
+                prev = _last_seen["value"]
+                if prev is not None and prev != raw:
+                    log.info("api_token_rotated", source="file")
+                _last_seen["value"] = raw
+                return raw, None
+            # Static-only path; api_token is guaranteed truthy here.
+            return _static_token, None
 
         class _AuthMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request: Request, call_next: Any) -> Any:
@@ -164,15 +196,22 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 # asset loads (img/css) and the SPA shell are also public.
                 if request.method == "OPTIONS" or p in _PUBLIC or p.startswith("/static/"):
                     return await call_next(request)
+                expected, err = _current_token()
+                if err is not None or expected is None:
+                    return Response(status_code=503, content=err or "auth misconfigured")
                 got = request.headers.get("X-API-Token") or request.query_params.get("token", "") or ""
                 # constant-time comparison so a timing oracle can't probe the
                 # token byte-by-byte.
-                if not _secrets.compare_digest(got, _expected_token):
+                if not _secrets.compare_digest(got, expected):
                     return Response(status_code=401, content="missing or wrong API token")
                 return await call_next(request)
 
         app.add_middleware(_AuthMiddleware)
-        log.info("api_token_enabled")
+        log.info(
+            "api_token_enabled",
+            source="file" if api_token_file else "env",
+            file=str(api_token_file) if api_token_file else None,
+        )
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

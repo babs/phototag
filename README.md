@@ -84,6 +84,16 @@ When `APP_API_TOKEN` is set, every API request requires
 asset loads); the SPA wires this automatically from the rendered template.
 Empty / unset disables auth — fine for the localhost-only default.
 
+To rotate the token without restarting the server, point `APP_API_TOKEN_FILE`
+at a small file holding the token; the middleware re-reads it on every
+protected request, so editing the file takes effect on the next call.
+
+```sh
+echo -n "rotated-secret" > /run/phototag.token
+APP_API_TOKEN_FILE=/run/phototag.token uv run phototag serve --host 0.0.0.0 --port 8090
+# later: `echo -n "newer-secret" > /run/phototag.token` — no restart needed.
+```
+
 ## License
 
 Apache-2.0

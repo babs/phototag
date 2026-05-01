@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # loads natively). Optional — empty/None disables auth entirely
     # (the local-loopback default).
     api_token: str | None = None
+    # When set, the middleware re-reads this file on every protected
+    # request (whitespace-stripped contents = the active token).
+    # Editing the file rotates the token without restart. Takes
+    # precedence over `api_token` when both are configured.
+    api_token_file: Path | None = None
 
     model_config = SettingsConfigDict(env_prefix="APP_", env_file=".env", extra="ignore")
 
