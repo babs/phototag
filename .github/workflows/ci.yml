@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    # Nightly slow run — model-backed tests (`-m slow`) only.
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    if: github.event_name != 'schedule'
+    name: lint + tests (fast)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: Install Python (3.14)
+        run: uv python install 3.14
+
+      # `tests/test_ui_api.py` imports fastapi.TestClient at module top,
+      # so we install the [ui] extra alongside dev deps. The other extras
+      # (ram, clip, face, cluster, report) only show up in slow / model-
+      # backed tests, which the nightly `slow` job covers.
+      - name: Sync core deps + UI extra
+        run: uv sync --extra ui --group dev
+
+      # Run the same pre-commit hook stack devs run locally — pinned mypy
+      # additional_dependencies so CI doesn't surface stricter
+      # `warn_return_any` errors than the dev environment can see.
+      - name: pre-commit (lint, format, mypy, secrets, pyupgrade)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+      - name: pytest (not slow)
+        run: uv run pytest -m "not slow" --cov=phototag --cov-report=term
+
+  slow:
+    if: github.event_name == 'schedule'
+    name: tests (slow / model-backed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: Install Python (3.14)
+        run: uv python install 3.14
+
+      - name: Sync with all extras
+        run: uv sync --extra all --group dev
+
+      # Tolerate "no tests collected" (pytest exit 5): no test currently
+      # carries `@pytest.mark.slow`, but the marker is reserved for future
+      # model-backed tests. Today the job exists as a green scaffold —
+      # actual failures (1, 2, 3, 4) still propagate.
+      - name: pytest (slow)
+        run: |
+          set +e
+          uv run pytest -m slow
+          rc=$?
+          if [ $rc -eq 5 ]; then
+            echo "::notice::No slow-marked tests yet (pytest exit 5) — treating as pass."
+            exit 0
+          fi
+          exit $rc
