@@ -1653,12 +1653,17 @@ async function showPersonByName(name) {
     }
   });
 
-  // Edit block (hidden by default): rename-all + split + clear.
+  // Edit block (hidden by default): rename-all + split + merge + clear.
   const editBlock = html(`<div id="person-edit" style="display:none; margin:8px 0 12px; padding:8px; background:#fff7ed; border-radius:4px;">
     <div class="rename" style="margin-bottom:6px;">
       <input id="group-rename-input" type="text" placeholder="rename all clusters of '${escape(name)}' to…" style="flex:1;">
       <button id="group-rename-save">rename all</button>
       <button id="group-clear" title="unname every cluster of this person">clear</button>
+    </div>
+    <div class="rename" style="margin-bottom:6px;">
+      <input id="group-merge-input" type="text" list="group-merge-names" placeholder="merge '${escape(name)}' into…" style="flex:1;">
+      <datalist id="group-merge-names"></datalist>
+      <button id="group-merge-save" title="blend centroids, re-label clusters, drop the duplicate identity">merge</button>
     </div>
     ${data.n_clusters > 1 ? `<div style="margin-top:4px;">
       <button id="group-split">split into ${data.n_clusters} (${escape(name)} 1, ${escape(name)} 2…)</button>
@@ -1668,7 +1673,11 @@ async function showPersonByName(name) {
   $('person-edit-toggle').onclick = () => {
     const r = $('person-edit');
     r.style.display = r.style.display === 'none' ? 'block' : 'none';
-    if (r.style.display === 'block') $('group-rename-input').focus();
+    if (r.style.display === 'block') {
+      $('group-rename-input').focus();
+      // Lazy-populate the merge datalist (excludes the current name).
+      populateMergeDatalist(name).catch(() => {});
+    }
   };
   $('group-rename-save').onclick = () => groupRename(name, $('group-rename-input').value.trim());
   $('group-clear').onclick = () => {
@@ -1676,6 +1685,10 @@ async function showPersonByName(name) {
   };
   $('group-rename-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); groupRename(name, e.target.value.trim()); }
+  });
+  $('group-merge-save').onclick = () => groupMerge(name, $('group-merge-input').value.trim());
+  $('group-merge-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); groupMerge(name, e.target.value.trim()); }
   });
   if ($('group-split')) $('group-split').onclick = () => groupSplit(name);
 
@@ -1738,6 +1751,40 @@ async function groupSplit(name) {
     return;
   }
   await showFacesPanel();
+}
+
+async function populateMergeDatalist(currentName) {
+  // Datalist powers the merge-into autocomplete; filter out the current name
+  // so the user can't accidentally pick a self-merge (server rejects it too).
+  const dl = document.getElementById('group-merge-names');
+  if (!dl) return;
+  dl.innerHTML = '';
+  const rows = await api('/api/people/names?limit=500');
+  for (const p of rows) {
+    if (!p.name || p.name === currentName) continue;
+    const opt = document.createElement('option');
+    opt.value = p.name;
+    dl.appendChild(opt);
+  }
+}
+
+async function groupMerge(loser, survivor) {
+  if (!survivor) { alert('survivor name required'); return; }
+  if (survivor === loser) { alert('survivor and loser must differ'); return; }
+  if (!confirm(`Merge "${loser}" into "${survivor}"? Centroids are blended and the "${loser}" identity is dropped.`)) return;
+  let result;
+  try {
+    result = await api('/api/face-identities/merge', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ survivor, loser }),
+    });
+  } catch (e) {
+    alert('merge failed: ' + e.message);
+    return;
+  }
+  alert(`merged: re-labelled ${result.renamed_clusters} cluster(s) → ${survivor}`);
+  await showFacesPanel();
+  await showPersonByName(survivor);
 }
 
 document.querySelectorAll('.view-btn').forEach(b => {

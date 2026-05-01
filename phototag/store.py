@@ -1623,6 +1623,43 @@ class Store:
         )
         return int(cur.fetchone()["id"])
 
+    def merge_face_identities(self, survivor: str, loser: str) -> dict[str, Any]:
+        """Collapse two `face_identities` rows representing the same person.
+
+        Sample-weighted centroid blend (capped at 200 to mirror
+        `phototag.faces.IDENTITY_SAMPLE_CAP` so a long-lived identity can
+        still drift on fresh evidence), summed display `n_samples`, then
+        re-label every cluster carrying `loser` to `survivor` and drop the
+        loser identity row. Caller MUST wrap this in `with s.transaction():`.
+        """
+        if survivor == loser:
+            raise ValueError("survivor and loser must differ")
+        ids = {i["name"]: i for i in self.list_face_identities()}
+        s_row = ids.get(survivor)
+        l_row = ids.get(loser)
+        if s_row is None:
+            raise ValueError(f"survivor identity not found: {survivor}")
+        if l_row is None:
+            raise ValueError(f"loser identity not found: {loser}")
+        # Cap matches phototag.faces.IDENTITY_SAMPLE_CAP=200; hard-coded here
+        # to avoid pulling the heavy faces module into the store layer.
+        cap = 200
+        n_s = int(s_row["n_samples"])
+        n_l = int(l_row["n_samples"])
+        n_eff_s = min(n_s, cap)
+        n_eff_l = min(n_l, cap)
+        blended = (s_row["centroid"] * n_eff_s + l_row["centroid"] * n_eff_l) / max(1, n_eff_s + n_eff_l)
+        total = n_s + n_l
+        self.upsert_face_identity(survivor, blended.astype(np.float32, copy=False), n_samples=total)
+        renamed = self.rename_clusters_by_label(loser, survivor)
+        self.delete_face_identity(loser)
+        return {
+            "survivor": survivor,
+            "loser": loser,
+            "renamed_clusters": int(renamed),
+            "n_samples": total,
+        }
+
     def purge_faces(self, *, keep_identities: bool = False) -> None:
         # Spec 15-faces.md: "wipe is total" — corrections audit trail goes too
         # unless --keep-identities is set (in which case corrections referencing

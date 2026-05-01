@@ -706,3 +706,74 @@ def test_corrections_logged_on_manual_name(client: TestClient, seeded_db: Path) 
     assert r.status_code == 200
     audit = client.get("/api/faces/corrections?action=named").json()
     assert any(c["face_id"] == new_face and c["name"] == "Carla" for c in audit)
+
+
+def test_face_identities_merge(client: TestClient, seeded_db: Path) -> None:
+    """Merge collapses two `face_identities` into one: blended centroid,
+    summed n_samples, every cluster of the loser re-labelled to survivor,
+    loser identity row deleted."""
+    s = Store(seeded_db)
+    run = s.latest_face_run()
+    assert run is not None
+    # Anne identity along axis 0 with 10 samples.
+    c_anne = np.zeros(512, dtype=np.float32)
+    c_anne[0] = 1.0
+    s.upsert_face_identity("Anne", c_anne, n_samples=10)
+    # Lee identity nearly aligned with Anne (the duplicate), 5 samples.
+    c_annie = np.zeros(512, dtype=np.float32)
+    c_annie[0] = 0.9
+    c_annie[1] = 0.1
+    s.upsert_face_identity("Lee", c_annie, n_samples=5)
+    # Add a real cluster labelled "Lee" so the rename has work to do.
+    img_id = _image_id(s, "/tmp/b.jpg")
+    cid = s.add_face_cluster(run_id=run, cluster_no=77, size=1, label_auto=None, label_user="Lee")
+    f = s.insert_face(
+        image_id=img_id,
+        bbox=[2, 2, 22, 22],
+        det_score=0.9,
+        embedding=np.array([0.1] * 512, dtype=np.float32),
+        model_name="m",
+    )
+    s.assign_face_to_cluster(f, cid, 0.0)
+    s.close()
+
+    r = client.post("/api/face-identities/merge", json={"survivor": "Anne", "loser": "Lee"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["survivor"] == "Anne"
+    assert body["loser"] == "Lee"
+    assert body["renamed_clusters"] == 1
+    assert body["n_samples"] == 15
+
+    s = Store(seeded_db)
+    try:
+        names = {i["name"] for i in s.list_face_identities()}
+        assert "Anne" in names
+        assert "Lee" not in names
+        anne_row = next(i for i in s.list_face_identities() if i["name"] == "Anne")
+        assert anne_row["n_samples"] == 15
+        # Every cluster previously labelled "Lee" now reads "Anne".
+        assert s.list_clusters_by_label("Lee") == []
+        assert any(c["id"] == cid for c in s.list_clusters_by_label("Anne"))
+    finally:
+        s.close()
+
+
+def test_face_identities_merge_missing_loser_404(client: TestClient, seeded_db: Path) -> None:
+    s = Store(seeded_db)
+    centroid = np.zeros(512, dtype=np.float32)
+    centroid[0] = 1.0
+    s.upsert_face_identity("Anne", centroid, n_samples=5)
+    s.close()
+    r = client.post("/api/face-identities/merge", json={"survivor": "Anne", "loser": "Ghost"})
+    assert r.status_code == 404
+
+
+def test_face_identities_merge_same_name_400(client: TestClient, seeded_db: Path) -> None:
+    s = Store(seeded_db)
+    centroid = np.zeros(512, dtype=np.float32)
+    centroid[0] = 1.0
+    s.upsert_face_identity("Anne", centroid, n_samples=5)
+    s.close()
+    r = client.post("/api/face-identities/merge", json={"survivor": "Anne", "loser": "Anne"})
+    assert r.status_code == 400

@@ -14,7 +14,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | 3 | Bulk auto-attach orphan faces | 🟢 | 1 h | `phototag faces auto-attach [--persist]` + `POST /api/faces/auto-attach-orphans?dry_run=`; vectorized cosine matmul |
 | 4 | Per-identity threshold tuning | ⬜ | 4 h | track per-identity sim distribution; raise auto-validate threshold for high-variance identities (kids growing, etc.) |
 | 5 | Hard-negative mining from `face_corrections` (tier-2 sticky) | 🟢 | 4 h | `unassigned` rows build a per-face cannot-link set on the rejected cluster's `label_user`; both `attach_face_to_best_identity` and `auto_attach_orphans` skip those identities so the system never re-suggests a name the user already rejected for that face |
-| 6 | Identity merge / split UI | ⬜ | 1 h | `POST /api/face-identities/merge?from=&to=` blends centroids by sample count |
+| 6 | Identity merge / split UI | 🟢 | 1 h | `POST /api/face-identities/merge` (body `{survivor, loser}`); sample-weighted centroid blend (cap=200, mirrors `IDENTITY_SAMPLE_CAP`), summed `n_samples`, re-labels loser's clusters to survivor, drops the loser row. Person edit (✏️) shows a "merge into…" autocomplete (datalist sourced from `/api/people/names`). Split was already shipped. |
 | 7 | Constrained HDBSCAN (tier-3 sticky) | ⬜ | 2 d | semi-supervised clusterer with must-link / cannot-link constraints from `face_corrections`; new dependency (`constrained-clustering` or hand-rolled) |
 
 ## Flow / UX
