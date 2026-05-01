@@ -193,6 +193,35 @@ MIGRATIONS: list[str] = [
     ALTER TABLE face_identities ADD COLUMN sim_mean REAL    NOT NULL DEFAULT 0.0;
     ALTER TABLE face_identities ADD COLUMN sim_M2   REAL    NOT NULL DEFAULT 0.0;
     """,
+    """
+    -- v11: user category mapping (#23). Drives lr:HierarchicalSubject in XMP
+    -- via `phototag xmp write --include-people --apply` once category-apply
+    -- ships. Three mapping sources, in precedence order: cluster (highest),
+    -- tag rule (middle), manual override on a single image (lowest -> until
+    -- explicit override comes, kept as a TODO; v11 schema covers cluster + tag
+    -- rules only).
+    --   categories         — the category vocabulary (one row per category).
+    --   tag_category_map   — `tag_id -> category_id` rules.
+    --   cluster_categories — `cluster_id -> category_id` overrides.
+    -- All FKs ON DELETE CASCADE so dropping a category cleans its rules; tag
+    -- and cluster deletes also clean their map rows. UNIQUE on (tag_id) and
+    -- (cluster_id) on purpose: one tag/cluster maps to at most one category
+    -- (caller picks the one that wins; spec says cluster > tag).
+    CREATE TABLE IF NOT EXISTS categories (
+        id   INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE
+    );
+    CREATE TABLE IF NOT EXISTS tag_category_map (
+        tag_id      INTEGER NOT NULL UNIQUE REFERENCES tags(id) ON DELETE CASCADE,
+        category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_tag_category_map_cat ON tag_category_map(category_id);
+    CREATE TABLE IF NOT EXISTS cluster_categories (
+        cluster_id  INTEGER NOT NULL UNIQUE REFERENCES face_clusters(id) ON DELETE CASCADE,
+        category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_cluster_categories_cat ON cluster_categories(category_id);
+    """,
 ]
 
 
@@ -1842,3 +1871,139 @@ class Store:
         if not keep_identities:
             self.conn.execute("DELETE FROM face_identities")
             self.conn.execute("DELETE FROM face_corrections")
+
+    # ---- categories (#23) ---------------------------------------------------
+
+    def add_category(self, name: str) -> int:
+        """Insert a category (or return its id if it already exists)."""
+        cur = self.conn.execute(
+            """
+            INSERT INTO categories(name) VALUES(?)
+            ON CONFLICT(name) DO UPDATE SET name=excluded.name
+            RETURNING id
+            """,
+            (name,),
+        )
+        return int(cur.fetchone()["id"])
+
+    def get_category_by_name(self, name: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT id, name FROM categories WHERE name=?", (name,)).fetchone()
+        return {"id": int(row["id"]), "name": row["name"]} if row else None
+
+    def list_categories(self) -> list[dict[str, Any]]:
+        cur = self.conn.execute("SELECT id, name FROM categories ORDER BY name")
+        return [{"id": int(r["id"]), "name": r["name"]} for r in cur]
+
+    def delete_category(self, name: str) -> int:
+        """Drop a category and (via cascade) every map row referencing it."""
+        cur = self.conn.execute("DELETE FROM categories WHERE name=?", (name,))
+        return int(cur.rowcount or 0)
+
+    def map_tag_to_category(self, tag_name: str, category_name: str) -> None:
+        """Bind a tag to a category. Both must already exist (caller does the
+        upsert if needed). Re-mapping a tag overrides the previous category."""
+        tag_row = self.conn.execute("SELECT id FROM tags WHERE name=?", (tag_name,)).fetchone()
+        if tag_row is None:
+            raise KeyError(f"unknown tag: {tag_name}")
+        cat = self.get_category_by_name(category_name)
+        if cat is None:
+            raise KeyError(f"unknown category: {category_name}")
+        self.conn.execute(
+            """
+            INSERT INTO tag_category_map(tag_id, category_id) VALUES(?, ?)
+            ON CONFLICT(tag_id) DO UPDATE SET category_id=excluded.category_id
+            """,
+            (int(tag_row["id"]), int(cat["id"])),
+        )
+
+    def unmap_tag(self, tag_name: str) -> int:
+        cur = self.conn.execute(
+            "DELETE FROM tag_category_map WHERE tag_id IN (SELECT id FROM tags WHERE name=?)",
+            (tag_name,),
+        )
+        return int(cur.rowcount or 0)
+
+    def map_face_cluster_to_category(self, cluster_id: int, category_name: str) -> None:
+        """Bind a face_cluster (the v15 face cluster, not the image cluster)
+        to a category. Used by the cluster→category rule (highest precedence)."""
+        cat = self.get_category_by_name(category_name)
+        if cat is None:
+            raise KeyError(f"unknown category: {category_name}")
+        if self.get_face_cluster(cluster_id) is None:
+            raise KeyError(f"unknown face cluster: {cluster_id}")
+        self.conn.execute(
+            """
+            INSERT INTO cluster_categories(cluster_id, category_id) VALUES(?, ?)
+            ON CONFLICT(cluster_id) DO UPDATE SET category_id=excluded.category_id
+            """,
+            (int(cluster_id), int(cat["id"])),
+        )
+
+    def unmap_face_cluster(self, cluster_id: int) -> int:
+        cur = self.conn.execute("DELETE FROM cluster_categories WHERE cluster_id=?", (int(cluster_id),))
+        return int(cur.rowcount or 0)
+
+    def list_tag_category_rules(self) -> list[dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT t.name AS tag, c.name AS category
+              FROM tag_category_map m
+              JOIN tags t ON t.id = m.tag_id
+              JOIN categories c ON c.id = m.category_id
+             ORDER BY c.name, t.name
+            """
+        )
+        return [dict(r) for r in cur]
+
+    def list_cluster_category_rules(self) -> list[dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT cc.cluster_id, fc.label_user, fc.cluster_no, c.name AS category
+              FROM cluster_categories cc
+              JOIN face_clusters fc ON fc.id = cc.cluster_id
+              JOIN categories c ON c.id = cc.category_id
+             ORDER BY c.name, fc.label_user
+            """
+        )
+        return [dict(r) for r in cur]
+
+    def categories_for_image(self, image_id: int) -> list[str]:
+        """Resolve every category that applies to this image, by union over:
+          1. cluster→category (this image's face_clusters)
+          2. tag→category (this image's tags above any threshold the caller set)
+
+        Returned names are unique and sorted alphabetically. Manual overrides
+        (per-image) are not yet implemented (see spec #23 follow-up).
+        """
+        seen: set[str] = set()
+        # Cluster→category: every face cluster mapped to a category that has at
+        # least one face on this image is in scope.
+        cur = self.conn.execute(
+            """
+            SELECT DISTINCT c.name AS name
+              FROM cluster_categories cc
+              JOIN categories c ON c.id = cc.category_id
+              JOIN face_cluster_assignments fca ON fca.cluster_id = cc.cluster_id
+              JOIN faces f ON f.id = fca.face_id
+             WHERE f.image_id = ?
+            """,
+            (int(image_id),),
+        )
+        for r in cur:
+            seen.add(r["name"])
+        # Tag→category. We don't filter by score here; the caller (e.g. xmp
+        # write) already gated the tag set via its own threshold. Simpler and
+        # avoids splitting the threshold across two layers.
+        cur = self.conn.execute(
+            """
+            SELECT DISTINCT c.name AS name
+              FROM tag_category_map tcm
+              JOIN categories c ON c.id = tcm.category_id
+              JOIN image_tags it ON it.tag_id = tcm.tag_id
+             WHERE it.image_id = ?
+            """,
+            (int(image_id),),
+        )
+        for r in cur:
+            seen.add(r["name"])
+        return sorted(seen)

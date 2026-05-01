@@ -171,3 +171,42 @@ def test_xmp_clean_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     payload = _last_json(r.stdout)
     assert payload["removed"] == 1
     assert not sidecar_path(img).exists()
+
+
+def test_xmp_write_emits_hierarchical_categories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a tag→category rule exists, `xmp write --apply` produces an
+    `lr:HierarchicalSubject` entry shaped as `category|subject` (#23)."""
+    db = tmp_path / "phototag.db"
+    img = tmp_path / "scene.jpg"
+    _make_jpeg(img)
+    s = Store(db)
+    image_id = s.upsert_image(
+        path=str(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
+    )
+    s.replace_image_tags(image_id, "ram_plus", [("x-ray", 0.9)])
+    with s.transaction():
+        s.add_category("medical")
+        s.map_tag_to_category("x-ray", "medical")
+    s.close()
+
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+    r = runner.invoke(app, ["xmp", "write", str(tmp_path), "--threshold", "0.5", "--apply"])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload["written"] == 1
+    sc = sidecar_path(img)
+    assert sc.exists()
+    assert _read_subjects(sc) == ["x-ray"]
+    # Hierarchical field readable via exiftool's structured output.
+    proc = subprocess.run(
+        ["exiftool", "-j", "-XMP-lr:HierarchicalSubject", str(sc)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(proc.stdout or "[]")
+    hier = data[0].get("HierarchicalSubject") if data else None
+    if isinstance(hier, str):
+        hier = [hier]
+    assert hier == ["medical|x-ray"], hier

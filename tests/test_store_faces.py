@@ -751,26 +751,66 @@ def test_attach_helper_per_identity_auto_verify_threshold(tmp_db: Path) -> None:
         store.close()
 
 
-def test_attach_helper_records_sim_after_attach(tmp_db: Path) -> None:
-    """Each successful attach must fold its own sim into the running stats so
-    the *next* attach faces the updated threshold."""
-    from phototag.faces import attach_face_to_best_identity
-
+def test_categories_for_image_unions_cluster_and_tag_rules(tmp_db: Path) -> None:
+    """`categories_for_image` resolves both cluster→category and tag→category
+    rules and returns the union (deduped, sorted). (#23 — categories)"""
     store = Store(tmp_db)
     try:
-        anne = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-        store.upsert_face_identity("Anne", anne, n_samples=5)
         img = _add_image(store, path="/tmp/a.jpg")
-        emb = np.array([0.95, 0.05, 0.0], dtype=np.float32)
-        fid = store.insert_face(
-            image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=emb, model_name="m"
-        )
-        hit = attach_face_to_best_identity(store, fid, emb, image_id=img)
-        assert hit is not None
-        ident = next(i for i in store.list_face_identities() if i["name"] == "Anne")
-        assert ident["sim_n"] == 1
-        # Mean equals the single recorded sim (which equals hit["sim"]).
-        assert abs(ident["sim_mean"] - float(hit["sim"])) < 1e-6
+        # Tag the image with "x-ray" so a tag→category rule applies.
+        with store.transaction():
+            store.replace_image_tags(img, "ram_plus", [("x-ray", 0.9)])
+        # Build a face cluster, tag it, and assign a face to it.
+        run = store.create_face_run({}, _now())
+        cl = store.add_face_cluster(run_id=run, cluster_no=0, size=1, label_auto="Anne", label_user="Anne")
+        fid = _add_face(store, img)
+        store.assign_face_to_cluster(fid, cl, distance=0.0, distance_kind="cosine_dist")
+        with store.transaction():
+            store.add_category("medical")
+            store.add_category("family")
+            store.map_tag_to_category("x-ray", "medical")
+            store.map_face_cluster_to_category(cl, "family")
+        assert store.categories_for_image(img) == ["family", "medical"]
+
+        # Removing the tag rule drops "medical"; cluster rule remains.
+        with store.transaction():
+            assert store.unmap_tag("x-ray") == 1
+        assert store.categories_for_image(img) == ["family"]
+
+        # Deleting the category cascades through both rule tables.
+        with store.transaction():
+            store.delete_category("family")
+        assert store.categories_for_image(img) == []
+        assert store.list_cluster_category_rules() == []
+    finally:
+        store.close()
+
+
+def test_category_map_unknown_targets_raise(tmp_db: Path) -> None:
+    """Mapping to an unknown category or tag raises KeyError (caller turns
+    that into a clean CLI exit code instead of a SQL FK explosion)."""
+    store = Store(tmp_db)
+    try:
+        with store.transaction():
+            store.add_category("medical")
+        # Unknown tag.
+        try:
+            with store.transaction():
+                store.map_tag_to_category("ghost-tag", "medical")
+        except KeyError as e:
+            assert "ghost-tag" in str(e)
+        else:
+            raise AssertionError("expected KeyError")
+        # Unknown category.
+        with store.transaction():
+            store.replace_image_tags(_add_image(store, path="/tmp/a.jpg"), "m", [("cat", 0.9)])
+        try:
+            with store.transaction():
+                store.map_tag_to_category("cat", "ghost-cat")
+        except KeyError as e:
+            assert "ghost-cat" in str(e)
+        else:
+            raise AssertionError("expected KeyError")
     finally:
         store.close()
 
@@ -833,3 +873,27 @@ def test_tier3_apply_constraints_in_place(tmp_db: Path) -> None:
     assert D[2, 0] == _TIER3_CANNOT_LINK_DISTANCE
     # Untouched cell stays put.
     assert D[1, 2] == 3.0
+
+
+def test_attach_helper_records_sim_after_attach(tmp_db: Path) -> None:
+    """Each successful attach must fold its own sim into the running stats so
+    the *next* attach faces the updated threshold."""
+    from phototag.faces import attach_face_to_best_identity
+
+    store = Store(tmp_db)
+    try:
+        anne = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        store.upsert_face_identity("Anne", anne, n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+        emb = np.array([0.95, 0.05, 0.0], dtype=np.float32)
+        fid = store.insert_face(
+            image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=emb, model_name="m"
+        )
+        hit = attach_face_to_best_identity(store, fid, emb, image_id=img)
+        assert hit is not None
+        ident = next(i for i in store.list_face_identities() if i["name"] == "Anne")
+        assert ident["sim_n"] == 1
+        # Mean equals the single recorded sim (which equals hit["sim"]).
+        assert abs(ident["sim_mean"] - float(hit["sim"])) < 1e-6
+    finally:
+        store.close()

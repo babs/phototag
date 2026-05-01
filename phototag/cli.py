@@ -1153,6 +1153,117 @@ xmp_app = typer.Typer(help="Write/clean XMP sidecars (digiKam, Lightroom, darkta
 app.add_typer(xmp_app, name="xmp")
 
 
+# ---- categories (#23) ------------------------------------------------------
+# Drives `lr:HierarchicalSubject` in XMP. Three rule sources, in precedence
+# order: face_cluster→category (highest), tag→category (middle), per-image
+# manual override (lowest, not yet implemented). The xmp writer joins the
+# resulting category set onto the image keyword set as `category|name`.
+category_app = typer.Typer(help="User category rules (drives XMP hierarchical keywords).")
+app.add_typer(category_app, name="category")
+
+
+@category_app.command("add")
+def category_add(name: Annotated[str, typer.Argument(help="Category name")]) -> None:
+    """Create a category (no-op if it already exists)."""
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        with store.transaction():
+            store.add_category(name)
+        typer.echo(f"category: {name}")
+    finally:
+        store.close()
+
+
+@category_app.command("rm")
+def category_rm(name: Annotated[str, typer.Argument(help="Category name")]) -> None:
+    """Drop a category and every rule referencing it (cascade)."""
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        with store.transaction():
+            n = store.delete_category(name)
+        typer.echo(json.dumps({"deleted": n, "name": name}))
+    finally:
+        store.close()
+
+
+@category_app.command("list")
+def category_list() -> None:
+    """Print every category + its mapped tags / face_clusters."""
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        cats = store.list_categories()
+        tag_rules = store.list_tag_category_rules()
+        cluster_rules = store.list_cluster_category_rules()
+        typer.echo(
+            json.dumps(
+                {
+                    "categories": cats,
+                    "tag_rules": tag_rules,
+                    "cluster_rules": cluster_rules,
+                },
+                indent=2,
+            )
+        )
+    finally:
+        store.close()
+
+
+@category_app.command("map")
+def category_map(
+    category: Annotated[str, typer.Option(help="Target category (must already exist)")],
+    tag: Annotated[str | None, typer.Option(help="Tag name to map")] = None,
+    cluster: Annotated[int | None, typer.Option(help="face_cluster id to map")] = None,
+) -> None:
+    """Bind a tag or a face_cluster to a category. Exactly one of --tag /
+    --cluster must be given."""
+    if (tag is None) == (cluster is None):
+        typer.echo("error: pass exactly one of --tag or --cluster", err=True)
+        raise typer.Exit(2)
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        with store.transaction():
+            if tag is not None:
+                store.map_tag_to_category(tag, category)
+                typer.echo(json.dumps({"tag": tag, "category": category}))
+            else:
+                assert cluster is not None
+                store.map_face_cluster_to_category(cluster, category)
+                typer.echo(json.dumps({"cluster": cluster, "category": category}))
+    except KeyError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    finally:
+        store.close()
+
+
+@category_app.command("unmap")
+def category_unmap(
+    tag: Annotated[str | None, typer.Option(help="Tag name to unmap")] = None,
+    cluster: Annotated[int | None, typer.Option(help="face_cluster id to unmap")] = None,
+) -> None:
+    """Drop a tag→category or face_cluster→category rule."""
+    if (tag is None) == (cluster is None):
+        typer.echo("error: pass exactly one of --tag or --cluster", err=True)
+        raise typer.Exit(2)
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        with store.transaction():
+            if tag is not None:
+                n = store.unmap_tag(tag)
+                typer.echo(json.dumps({"tag": tag, "removed": n}))
+            else:
+                assert cluster is not None
+                n = store.unmap_face_cluster(cluster)
+                typer.echo(json.dumps({"cluster": cluster, "removed": n}))
+    finally:
+        store.close()
+
+
 def _collect_image_plans(
     path: Path,
     store: Store,
@@ -1183,14 +1294,20 @@ def _collect_image_plans(
                 if label:
                     people.append(str(label))
         subjects = sorted(set(tag_names) | set(people))
-        # TODO(#23): populate `hierarchical` from `tag_category_map` once
-        # the categories schema + apply step ship.
+        # #23: hierarchical XMP keywords. Each category resolved for this
+        # image becomes a Lightroom-style "category|subject" rooted path —
+        # one entry per (category, subject) pair so a photo of "Anne" tagged
+        # "x-ray" and mapped via cluster→family + tag→medical surfaces both
+        # `family|Anne` and `medical|x-ray`. Mirrors what Lightroom writes
+        # natively and is what digiKam expects to read.
+        categories = store.categories_for_image(image_row.id)
+        hierarchical = sorted({f"{c}|{s}" for c in categories for s in subjects})
         plans.append(
             {
                 "path": str(scanned.path),
                 "image_id": image_row.id,
                 "subjects": subjects,
-                "hierarchical": [],
+                "hierarchical": hierarchical,
             }
         )
     return plans

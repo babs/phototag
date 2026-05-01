@@ -262,3 +262,63 @@ def test_prune_dry_run_then_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert s.get_image(missing_id) is None
     assert s.get_image(real_id) is not None
     s.close()
+
+
+def test_category_cli_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`category add` / `map --tag` / `list` / `unmap --tag` / `rm` round-trip.
+
+    Validates the CLI surface that #23 ships, end-to-end through Typer."""
+    db = tmp_path / "phototag.db"
+    s = Store(db)
+    img = s.upsert_image(
+        path=str(tmp_path / "x.jpg"),
+        hash_="h",
+        mtime=1.0,
+        width=4,
+        height=4,
+        exif=None,
+        processed_at=_now(),
+    )
+    s.replace_image_tags(img, "ram_plus", [("x-ray", 0.9)])
+    s.close()
+
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+
+    # add → success
+    r = runner.invoke(app, ["category", "add", "medical"])
+    assert r.exit_code == 0, r.output
+
+    # map tag → category
+    r = runner.invoke(app, ["category", "map", "--tag", "x-ray", "--category", "medical"])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload == {"tag": "x-ray", "category": "medical"}
+
+    # list shows the rule
+    r = runner.invoke(app, ["category", "list"])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload["categories"] == [{"id": 1, "name": "medical"}]
+    assert payload["tag_rules"] == [{"tag": "x-ray", "category": "medical"}]
+    assert payload["cluster_rules"] == []
+
+    # mapping to an unknown category fails cleanly with a non-zero exit code
+    r = runner.invoke(app, ["category", "map", "--tag", "x-ray", "--category", "ghost"])
+    assert r.exit_code == 1, r.output
+
+    # passing both --tag and --cluster (or neither) returns usage error 2
+    r = runner.invoke(app, ["category", "map", "--category", "medical"])
+    assert r.exit_code == 2, r.output
+
+    # unmap removes the rule
+    r = runner.invoke(app, ["category", "unmap", "--tag", "x-ray"])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload == {"tag": "x-ray", "removed": 1}
+
+    # rm cascades cleanly
+    r = runner.invoke(app, ["category", "rm", "medical"])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload["deleted"] == 1
