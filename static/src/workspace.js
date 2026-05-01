@@ -285,16 +285,65 @@ async function previewOrphanRecluster(dryRun) {
   if (!result.clusters.length) {
     out.appendChild(html('<div class="empty">no clusters formed at these settings</div>'));
   } else {
+    // #12: expanders show ~5 sample faces per proposed cluster (the
+    // `sample_face_ids` the backend already computes — nearest to centroid).
+    // Lets the user sanity-check a dry-run before committing it.
     const table = html('<table style="border-collapse:collapse; font-size:12px; width:100%; max-width:720px;"></table>');
-    table.appendChild(html('<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border);">cluster</th><th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border);">size</th><th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border);">matched identity</th></tr></thead>'));
+    table.appendChild(html(`<thead><tr>
+      <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border);"></th>
+      <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border);">cluster</th>
+      <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border);">size</th>
+      <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border);">matched identity</th>
+    </tr></thead>`));
     const tbody = html('<tbody></tbody>');
     for (const c of result.clusters) {
-      const tr = html(`<tr>
+      const samples = Array.isArray(c.sample_face_ids) ? c.sample_face_ids : [];
+      const expandable = samples.length > 0;
+      const tr = html(`<tr class="recluster-row" data-cluster="${c.cluster_no}">
+        <td style="padding:4px 8px;border-bottom:1px solid #f0f0f0; width:24px;">
+          ${expandable ? '<button class="recluster-toggle" type="button" style="background:none;border:0;cursor:pointer;font-family:inherit;font-size:12px;padding:0;color:var(--muted);">▸</button>' : ''}
+        </td>
         <td style="padding:4px 8px;border-bottom:1px solid #f0f0f0;">#${c.cluster_no}</td>
         <td style="padding:4px 8px;border-bottom:1px solid #f0f0f0;">${c.size}</td>
         <td style="padding:4px 8px;border-bottom:1px solid #f0f0f0;">${c.label_user ? `<b>${escape(c.label_user)}</b>` : '<span style="color:var(--muted);">(new)</span>'}</td>
       </tr>`);
       tbody.appendChild(tr);
+      if (expandable) {
+        // Hidden expander row — strip of face thumbs, lazy-loaded so a
+        // 50-cluster preview doesn't fan out 250 image requests up front.
+        const expander = html(`<tr class="recluster-expander" style="display:none;">
+          <td></td>
+          <td colspan="3" style="padding:6px 8px;border-bottom:1px solid #f0f0f0;">
+            <div class="recluster-thumbs" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+          </td>
+        </tr>`);
+        tbody.appendChild(expander);
+        const btn = tr.querySelector('.recluster-toggle');
+        btn.addEventListener('click', () => {
+          const open = expander.style.display !== 'none';
+          expander.style.display = open ? 'none' : '';
+          btn.textContent = open ? '▸' : '▾';
+          if (!open) {
+            const strip = expander.querySelector('.recluster-thumbs');
+            if (!strip.dataset.loaded) {
+              for (const fid of samples) {
+                const img = document.createElement('img');
+                img.loading = 'lazy';
+                img.src = `/face-thumb/${fid}`;
+                img.alt = `face ${fid}`;
+                img.title = `face ${fid}`;
+                img.style.width = '52px';
+                img.style.height = '52px';
+                img.style.objectFit = 'cover';
+                img.style.borderRadius = '3px';
+                img.style.border = '1px solid var(--border)';
+                strip.appendChild(img);
+              }
+              strip.dataset.loaded = '1';
+            }
+          }
+        });
+      }
     }
     table.appendChild(tbody);
     out.appendChild(table);

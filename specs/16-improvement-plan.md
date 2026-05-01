@@ -25,7 +25,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | 9 | Validate-and-advance | 🟢 | 0.5 h | clicking V (validate) auto-advances popover to next un-verified named face on the same image; falls back to plain close+refresh when nothing is left |
 | 10 | Photo triage queue | 🟢 | 1 h | `GET /api/faces/triage` (`store.list_triage_images`) returns `{id, path, n_unverified, n_dups, score}` with `score = n_unverified + 2*n_dups`; sidebar pins a "triage queue" entry next to noise/orphan; workspace grid seeds `viewIds` so ←/→ in the lightbox walks the queue |
 | 11 | Identity gallery edge view | 🟢 | 1 h | on `/api/people/by-name/{name}` show 9 most-distant-from-centroid faces (the ambiguous edge) for quick triage |
-| 12 | Re-cluster preview members | ⬜ | 4 h | dry-run output already has cluster IDs; UI expander showing the ~5 faces nearest each centroid before persisting |
+| 12 | Re-cluster preview members | 🟢 | 1 h | dry-run output already carries `sample_face_ids` (5 nearest-to-centroid faces per proposed cluster — backend was complete; UI piece was missing). Workspace's orphan-recluster preview now renders one expander per cluster row that lazy-loads `<img src="/face-thumb/{id}">` thumbs only when the user opens it (no fan-out of 250 image requests up front on a 50-cluster preview). Confirmation flow / `--persist` button unchanged. |
 | 13 | Drag-to-redraw bbox | ⬜ | 4 h | per-image bbox edit + re-embed via insightface; biggest UX upside but heaviest impl |
 
 ## Performance / correctness
