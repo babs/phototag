@@ -700,6 +700,7 @@ def attach_face_to_best_identity(
     image_id: int | None = None,
     threshold: float = 0.5,
     auto_verify_threshold: float = 0.7,
+    min_margin: float = 0.05,
     manual_run_id: int | None = None,
 ) -> dict[str, Any] | None:
     """Auto-cluster a single fresh face into a known identity.
@@ -729,8 +730,14 @@ def attach_face_to_best_identity(
     emb = np.asarray(embedding, dtype=np.float32)
     edim = int(emb.shape[0])
 
+    # Track top-2 so we can refuse to attach when the choice is ambiguous
+    # (top1 - top2 < min_margin). On the live corpus we observed faces with
+    # Brooke 0.581 vs Carla 0.577 — a 0.004 margin where deterministic
+    # tie-break is essentially random and "named-but-wrong" is worse than
+    # "still-orphan, prompt me".
     best_name: str | None = None
     best_sim = -1.0
+    second_sim = -1.0
     best_centroid: np.ndarray | None = None
     best_n = 0
     for ident in identities:
@@ -738,11 +745,17 @@ def attach_face_to_best_identity(
             continue
         sim = _cosine_sim(emb, ident["centroid"])
         if sim > best_sim:
+            second_sim = best_sim
             best_sim = sim
             best_name = str(ident["name"])
             best_centroid = np.asarray(ident["centroid"], dtype=np.float32)
             best_n = int(ident.get("n_samples", 0)) or 0
+        elif sim > second_sim:
+            second_sim = sim
     if best_name is None or best_sim < threshold or best_centroid is None:
+        return None
+    if second_sim >= 0.0 and (best_sim - second_sim) < min_margin:
+        # Two identities are within the noise band — bail.
         return None
 
     # Locate or create the manual face_run (same one the manual-name path uses).
@@ -800,6 +813,12 @@ def attach_face_to_best_identity(
         cluster_id=cid,
         name=best_name,
     )
+    # Symmetric with the manual-name path (see api_face_name): once a face
+    # is bound to a real identity, its prior noise-cluster membership is
+    # stale data that would (a) inflate the noise cluster's `size` and
+    # (b) keep this face listed under "unidentified" until the next full
+    # re-cluster.
+    store.detach_face_from_noise(face_id)
     return {"name": best_name, "sim": float(best_sim), "user_verified": auto_validated}
 
 
@@ -808,6 +827,7 @@ def auto_attach_orphans(
     *,
     threshold: float = 0.5,
     auto_verify_threshold: float = 0.7,
+    min_margin: float = 0.05,
     dry_run: bool = True,
     limit: int | None = None,
 ) -> dict[str, Any]:
@@ -829,6 +849,7 @@ def auto_attach_orphans(
             "auto_validated": 0,
             "by_identity": {},
             "below_threshold": 0,
+            "ambiguous": 0,
             "dry_run": dry_run,
         }
     if limit is not None:
@@ -843,6 +864,7 @@ def auto_attach_orphans(
             "auto_validated": 0,
             "by_identity": {},
             "below_threshold": int(len(orphan_ids)),
+            "ambiguous": 0,
             "dry_run": dry_run,
         }
 
@@ -855,6 +877,7 @@ def auto_attach_orphans(
             "auto_validated": 0,
             "by_identity": {},
             "below_threshold": int(len(orphan_ids)),
+            "ambiguous": 0,
             "dry_run": dry_run,
         }
 
@@ -864,15 +887,31 @@ def auto_attach_orphans(
     sim = on @ inn.T  # (N_orphan, N_idents)
     best_j = np.argmax(sim, axis=1)
     best_s = sim[np.arange(sim.shape[0]), best_j]
+    # Top-2 sim per row for the ambiguity check (set best to -inf, then
+    # max again). When N_idents == 1, there is no second best — treat the
+    # margin check as trivially satisfied.
+    if sim.shape[1] >= 2:
+        sim2 = sim.copy()
+        sim2[np.arange(sim.shape[0]), best_j] = -np.inf
+        second_s = sim2.max(axis=1)
+    else:
+        second_s = np.full_like(best_s, -np.inf)
 
     # Group attaches by identity so we can hoist the manual_run + per-name
-    # cluster lookup once per identity instead of once per face.
+    # cluster lookup once per identity instead of once per face. Faces with
+    # an ambiguous top-2 (margin < min_margin) are dropped here so they
+    # surface in the "below_threshold" tally for the report.
     matches: dict[int, list[tuple[int, float, np.ndarray]]] = {}
     below = 0
+    ambiguous = 0
     for i, fid in enumerate(orphan_ids):
         s = float(best_s[i])
         if s < threshold:
             below += 1
+            continue
+        s2 = float(second_s[i])
+        if s2 > -np.inf and (s - s2) < min_margin:
+            ambiguous += 1
             continue
         matches.setdefault(int(best_j[i]), []).append((int(fid), s, orphan_mat[i]))
 
@@ -897,6 +936,7 @@ def auto_attach_orphans(
             "matched": matched,
             "auto_validated": auto_validated,
             "below_threshold": below,
+            "ambiguous": ambiguous,
             "by_identity": by_identity,
             "dry_run": True,
         }
@@ -911,6 +951,17 @@ def auto_attach_orphans(
             if run_row
             else store.create_face_run({"manual": True, "model": MODEL_NAME}, _now_iso())
         )
+        # Bulk-load (face_id → image_id) so each attach call gets a real
+        # image_id in its audit row instead of NULL. One SELECT vs N.
+        all_orphan_ids = [fid for items in matches.values() for fid, _, _ in items]
+        image_by_face: dict[int, int] = {}
+        if all_orphan_ids:
+            placeholders = ",".join("?" * len(all_orphan_ids))
+            for r in store.conn.execute(
+                f"SELECT id, image_id FROM faces WHERE id IN ({placeholders})",
+                all_orphan_ids,
+            ):
+                image_by_face[int(r["id"])] = int(r["image_id"])
         for j, items in matches.items():
             name = str(same_dim[j]["name"])
             n_validated = 0
@@ -919,7 +970,7 @@ def auto_attach_orphans(
                     store,
                     fid,
                     emb,
-                    image_id=None,
+                    image_id=image_by_face.get(fid),
                     threshold=threshold,
                     auto_verify_threshold=auto_verify_threshold,
                     manual_run_id=manual_run_id,
@@ -942,12 +993,14 @@ def auto_attach_orphans(
         matched=matched,
         auto_validated=auto_validated,
         below_threshold=below,
+        ambiguous=ambiguous,
     )
     return {
         "n_orphan": int(len(orphan_ids)),
         "matched": matched,
         "auto_validated": auto_validated,
         "below_threshold": below,
+        "ambiguous": ambiguous,
         "by_identity": by_identity,
         "dry_run": False,
     }

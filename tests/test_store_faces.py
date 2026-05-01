@@ -340,6 +340,90 @@ def test_auto_attach_orphans_dry_run(tmp_db: Path) -> None:
         store.close()
 
 
+def test_attach_helper_detaches_from_noise(tmp_db: Path) -> None:
+    """A face attached via the helper must lose its noise-cluster membership
+    so the noise size and the unidentified workspace stay accurate."""
+    from phototag.faces import attach_face_to_best_identity
+
+    store = Store(tmp_db)
+    try:
+        store.upsert_face_identity("Anne", np.array([1.0, 0.0, 0.0], dtype=np.float32), n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+        # Insert a face + assign to a noise cluster.
+        run = store.create_face_run({}, _now())
+        noise_cid = store.add_face_cluster(
+            run_id=run, cluster_no=-1, size=1, label_auto="noise", label_user=None
+        )
+        emb = np.array([0.95, 0.05, 0.0], dtype=np.float32)
+        fid = store.insert_face(
+            image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=emb, model_name="m"
+        )
+        store.assign_face_to_cluster(fid, noise_cid, distance=0.0)
+        assert _gfc(store, noise_cid)["size"] == 1
+
+        hit = attach_face_to_best_identity(store, fid, emb, image_id=img)
+        assert hit is not None and hit["name"] == "Anne"
+
+        # Noise membership gone; noise size decremented.
+        cur = store.conn.execute(
+            "SELECT cluster_id FROM face_cluster_assignments WHERE face_id=?", (fid,)
+        ).fetchall()
+        cluster_ids = {int(r["cluster_id"]) for r in cur}
+        assert noise_cid not in cluster_ids
+        assert _gfc(store, noise_cid)["size"] == 0
+    finally:
+        store.close()
+
+
+def test_attach_helper_refuses_ambiguous_top2(tmp_db: Path) -> None:
+    """Two near-equal centroids → bail rather than guess."""
+    from phototag.faces import attach_face_to_best_identity
+
+    store = Store(tmp_db)
+    try:
+        # Two identities along orthogonal axes; query equidistant from both.
+        store.upsert_face_identity("Anne", np.array([1.0, 0.0], dtype=np.float32), n_samples=5)
+        store.upsert_face_identity("Bea", np.array([0.0, 1.0], dtype=np.float32), n_samples=5)
+        img = _add_image(store, path="/tmp/x.jpg")
+        # Equidistant: cos(sim, Anne) ≈ cos(sim, Bea) ≈ 0.707
+        emb = np.array([0.707, 0.707], dtype=np.float32)
+        fid = store.insert_face(
+            image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=emb, model_name="m"
+        )
+        # Default min_margin=0.05 — top-1 vs top-2 are within ~0 → bail.
+        assert attach_face_to_best_identity(store, fid, emb, image_id=img) is None
+
+        # Lowering margin to 0 forces an attach; sanity-check the bail path
+        # was not a false negative.
+        hit = attach_face_to_best_identity(store, fid, emb, image_id=img, min_margin=0.0)
+        assert hit is not None
+    finally:
+        store.close()
+
+
+def test_auto_attach_orphans_image_id_in_audit(tmp_db: Path) -> None:
+    """Bulk path must populate face_corrections.image_id, not leave NULL."""
+    from phototag.faces import auto_attach_orphans
+
+    store = Store(tmp_db)
+    try:
+        store.upsert_face_identity("Anne", np.array([1.0, 0.0, 0.0], dtype=np.float32), n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+        fid = store.insert_face(
+            image_id=img,
+            bbox=[0, 0, 10, 10],
+            det_score=0.9,
+            embedding=np.array([0.99, 0.01, 0.0], dtype=np.float32),
+            model_name="insightface_buffalo_l_v1",
+        )
+        result = auto_attach_orphans(store, dry_run=False)
+        assert result["matched"] == 1
+        rows = store.list_face_corrections(face_id=fid, action="named")
+        assert rows and rows[0]["image_id"] == img
+    finally:
+        store.close()
+
+
 def test_auto_attach_orphans_persist(tmp_db: Path) -> None:
     from phototag.faces import auto_attach_orphans
 

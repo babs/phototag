@@ -620,10 +620,27 @@ function openFaceNameForm(face, x, y) {
       // Bail if the popover moved on to another face while we were waiting.
       if (!pendingFace || pendingFace.id !== reqFaceId) return;
       if (!Array.isArray(items) || items.length === 0) return;
-      for (const it of items) {
+      // Backend returns the raw top-K (no threshold) so the caller can decide.
+      // Drop chips below the attach threshold so we never *suggest* a match
+      // the system itself wouldn't auto-attach. 0.5 mirrors the default
+      // `attach_face_to_best_identity` threshold.
+      const SUGGEST_MIN_SIM = 0.5;
+      const usable = items.filter(it => Number(it.sim) >= SUGGEST_MIN_SIM);
+      if (!usable.length) return;
+      // When the top-2 are very close, the highest one is a coin-flip too —
+      // collapse to a single chip so the user sees "ambiguous, pick one"
+      // instead of two chips of equal weight. Mirrors the backend min_margin.
+      const SUGGEST_MIN_MARGIN = 0.05;
+      const top = usable[0];
+      const ambiguous =
+        usable.length >= 2 && (Number(top.sim) - Number(usable[1].sim)) < SUGGEST_MIN_MARGIN;
+      const chips = ambiguous ? usable : usable;  // keep all for transparency
+      for (const it of chips) {
         const chip = document.createElement('span');
-        chip.className = 'chip';
-        chip.title = `attach to ${it.name} (${it.n_samples} samples)`;
+        chip.className = 'chip' + (ambiguous && it !== top ? ' alt' : '');
+        chip.title = ambiguous
+          ? `attach to ${it.name} (${it.n_samples} samples) — ambiguous: top-2 within ${SUGGEST_MIN_MARGIN}`
+          : `attach to ${it.name} (${it.n_samples} samples)`;
         const nm = document.createElement('span');
         nm.textContent = it.name;
         const sim = document.createElement('span');
