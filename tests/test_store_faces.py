@@ -288,6 +288,86 @@ def test_attach_face_to_best_identity(tmp_db: Path) -> None:
         store.close()
 
 
+def test_auto_attach_orphans_dry_run(tmp_db: Path) -> None:
+    """Dry-run reports per-identity histogram + auto-validate counts; no DB writes."""
+    from phototag.faces import auto_attach_orphans
+
+    store = Store(tmp_db)
+    try:
+        # Two identities at orthogonal centroids.
+        store.upsert_face_identity("Anne", np.array([1.0, 0.0, 0.0], dtype=np.float32), n_samples=5)
+        store.upsert_face_identity("Bob", np.array([0.0, 1.0, 0.0], dtype=np.float32), n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+        # 3 strong-Anne, 2 strong-Bob, 1 nowhere.
+        for _ in range(3):
+            store.insert_face(
+                image_id=img,
+                bbox=[0, 0, 10, 10],
+                det_score=0.9,
+                embedding=np.array([0.99, 0.01, 0.0], dtype=np.float32),
+                model_name="insightface_buffalo_l_v1",
+            )
+        for _ in range(2):
+            store.insert_face(
+                image_id=img,
+                bbox=[20, 20, 10, 10],
+                det_score=0.9,
+                embedding=np.array([0.01, 0.99, 0.0], dtype=np.float32),
+                model_name="insightface_buffalo_l_v1",
+            )
+        store.insert_face(
+            image_id=img,
+            bbox=[40, 40, 10, 10],
+            det_score=0.9,
+            embedding=np.array([0.0, 0.0, 1.0], dtype=np.float32),
+            model_name="insightface_buffalo_l_v1",
+        )
+
+        result = auto_attach_orphans(store, dry_run=True)
+        assert result["dry_run"] is True
+        assert result["n_orphan"] == 6
+        assert result["matched"] == 5
+        assert result["below_threshold"] == 1
+        assert "Anne" in result["by_identity"]
+        assert "Bob" in result["by_identity"]
+        assert result["by_identity"]["Anne"]["n"] == 3
+        assert result["by_identity"]["Bob"]["n"] == 2
+        # All matched faces are at sim ≈ 1.0 → all auto-validated.
+        assert result["auto_validated"] == 5
+        # Confirm dry-run wrote nothing: still no cluster assignments.
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM face_cluster_assignments").fetchone()["n"] == 0
+    finally:
+        store.close()
+
+
+def test_auto_attach_orphans_persist(tmp_db: Path) -> None:
+    from phototag.faces import auto_attach_orphans
+
+    store = Store(tmp_db)
+    try:
+        store.upsert_face_identity("Anne", np.array([1.0, 0.0, 0.0], dtype=np.float32), n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+        fid = store.insert_face(
+            image_id=img,
+            bbox=[0, 0, 10, 10],
+            det_score=0.9,
+            embedding=np.array([0.99, 0.01, 0.0], dtype=np.float32),
+            model_name="insightface_buffalo_l_v1",
+        )
+        result = auto_attach_orphans(store, dry_run=False)
+        assert result["matched"] == 1
+        rows = store.list_faces_for_image(img)
+        assert rows[0]["label_user"] == "Anne"
+        assert rows[0]["user_verified"] == 1
+        # attach_sim is ≈ 0.9999
+        assert rows[0]["attach_sim"] is not None
+        assert rows[0]["attach_sim"] > 0.99
+        # face_id was the orphan; persist hits attach_face_to_best_identity for each.
+        assert fid == rows[0]["id"]
+    finally:
+        store.close()
+
+
 def test_purge_faces(tmp_db: Path) -> None:
     store = Store(tmp_db)
     try:

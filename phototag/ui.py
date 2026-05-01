@@ -386,6 +386,32 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         face_count is the *unidentified* count for that photo, not the total."""
         return _store(app).list_images_with_unidentified_faces(limit=limit)
 
+    @app.post("/api/faces/auto-attach-orphans")
+    def api_auto_attach_orphans(
+        threshold: float = 0.5,
+        auto_verify_threshold: float = 0.7,
+        dry_run: bool = True,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Bulk-attach orphan faces to known identities. Defaults to dry-run."""
+        from .faces import auto_attach_orphans
+
+        result = auto_attach_orphans(
+            _store(app),
+            threshold=threshold,
+            auto_verify_threshold=auto_verify_threshold,
+            limit=limit,
+            dry_run=dry_run,
+        )
+        log.info(
+            "auto_attach_orphans",
+            dry_run=dry_run,
+            n_orphan=result["n_orphan"],
+            matched=result["matched"],
+            auto_validated=result["auto_validated"],
+        )
+        return result
+
     @app.post("/api/faces/recluster-orphan")
     def api_recluster_orphan(
         min_size: int = 3,
@@ -792,6 +818,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     "label": f["label_user"] or f["label_auto"],
                     "named": f["label_user"] is not None,
                     "color": cluster_color(f["cluster_id"]),
+                    "attach_sim": f.get("attach_sim"),
                 }
             )
         return out

@@ -531,7 +531,14 @@ function renderFaceOverlays() {
     let prefix = '';
     if (dupName) prefix = '⚠ ';
     else if (f.named && !userVerified) prefix = '? ';
-    lbl.textContent = prefix + (f.label || 'name…');
+    // Show the auto-attach confidence (rounded) next to the label when the
+    // face came from an identity match — helps spot marginal attachments
+    // (sim 0.5–0.7) that the user should sanity-check.
+    let suffix = '';
+    if (f.named && typeof f.attach_sim === 'number') {
+      suffix = ` · ${f.attach_sim.toFixed(2)}`;
+    }
+    lbl.textContent = prefix + (f.label || 'name…') + suffix;
     box.appendChild(lbl);
     box.onclick = (e) => { e.stopPropagation(); onFaceClicked(f, e.clientX, e.clientY); };
     layer.appendChild(box);
@@ -1012,7 +1019,40 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 't' || e.key === 'T') { e.preventDefault(); toggleTagsCloud(); }
   else if (e.key === 'ArrowLeft' || e.key === 'PageUp' || e.key === 'k') { e.preventDefault(); navLightbox(-1); }
   else if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === 'j' || e.key === ' ') { e.preventDefault(); navLightbox(1); }
+  // N — jump to the next photo (after the current viewIndex) that has at
+  // least one unidentified face. Wraps to the start. Empty → no-op.
+  else if (e.key === 'n' || e.key === 'N') { e.preventDefault(); jumpToNextUnidentified(); }
 });
+
+async function jumpToNextUnidentified() {
+  if (!state.viewIds.length) return;
+  // Pull the photos with unidentified faces and intersect with current view.
+  let candidates = [];
+  try {
+    const data = await api('/api/faces/unidentified/images?limit=2000');
+    candidates = data.map(it => it.id);
+  } catch (e) { return; }
+  if (!candidates.length) return;
+  const candSet = new Set(candidates);
+  const viewIds = state.viewIds;
+  const start = state.viewIndex;
+  for (let off = 1; off <= viewIds.length; off++) {
+    const i = (start + off) % viewIds.length;
+    if (candSet.has(viewIds[i])) {
+      state.viewIndex = i;
+      showCurrentLightbox();
+      writeHash();
+      return;
+    }
+  }
+  // None in current view — load the first orphan photo into the view.
+  if (candidates.length) {
+    state.viewIds = candidates;
+    state.viewIndex = 0;
+    showCurrentLightbox();
+    writeHash();
+  }
+}
 
 // ---- URL hash sync (so refresh / share preserves view) ----------------------
 

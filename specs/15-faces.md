@@ -214,6 +214,15 @@ POST   /api/faces/recluster-orphan                → re-run UMAP+HDBSCAN on the
                                                     faces from prior clusters.
                                                     Named clusters never
                                                     touched.
+POST   /api/faces/auto-attach-orphans              → vectorized cosine match of
+       ?dry_run=true|false                          every orphan face against
+       &threshold=0.5                               face_identities centroids.
+       &auto_verify_threshold=0.7                   Matches ≥ threshold join the
+       &limit=N                                     identity's manual cluster;
+                                                    sim ≥ auto_verify_threshold
+                                                    also flips user_verified=1.
+                                                    Returns per-identity
+                                                    histogram + counts.
 
 GET    /face-thumb/{face_id}                      → cropped face JPEG (cached)
 ```
@@ -303,12 +312,19 @@ This feature processes biometric data. Hard rules:
 ## CLI summary
 
 ```
-phototag faces detect [--gpu] [--limit N] [--i-understand]
-phototag faces cluster [--min-size 3] [--min-samples 2]
-phototag faces name CLUSTER_ID NAME
-phototag faces unname CLUSTER_ID
-phototag faces purge [--keep-identities]
-phototag faces report [--out report-faces/]
+phototag faces detect          [--limit N] [--force] [--i-understand]
+phototag faces cluster         [--min-size 3] [--min-samples 2]
+phototag faces verify          [--min-score 0.65] [--min-area 1024] [--apply]
+phototag faces refine-noise    [--min-size 3] [--min-samples 2] [--persist]
+phototag faces auto-attach     [--threshold 0.5] [--auto-verify-threshold 0.7]
+                               [--limit N] [--persist]
+phototag faces name            CLUSTER_ID NAME
+phototag faces unname          CLUSTER_ID
+phototag faces clear-noise-labels
+phototag faces corrections     [--action ACT] [--face-id N] [--limit N]
+phototag faces stats
+phototag faces purge           [--keep-identities] [--yes]
+phototag faces report          [--out report-faces/]
 ```
 
 ## Performance expectations

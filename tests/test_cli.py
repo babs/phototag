@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from PIL import Image
 from typer.testing import CliRunner
@@ -102,6 +103,50 @@ def test_export_json_then_csv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     r = runner.invoke(app, ["export", "--format", "csv", "--out", str(out_csv)])
     assert r.exit_code == 0, r.output
     assert "cat:0.90" in out_csv.read_text()
+
+
+def test_doctor_detects_and_fixes_size_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`phototag doctor` flags face_clusters.size mismatch; --fix recomputes."""
+    db = tmp_path / "phototag.db"
+    s = Store(db)
+    img = s.upsert_image(
+        path=str(tmp_path / "a.jpg"),
+        hash_="h",
+        mtime=1.0,
+        width=4,
+        height=4,
+        exif=None,
+        processed_at=_now(),
+    )
+    run = s.create_face_run({}, _now())
+    cid = s.add_face_cluster(run_id=run, cluster_no=0, size=99, label_auto=None)  # wrong size
+    f = s.insert_face(
+        image_id=img,
+        bbox=[0, 0, 10, 10],
+        det_score=0.9,
+        embedding=np.ones(2, dtype=np.float32),
+        model_name="m",
+    )
+    s.assign_face_to_cluster(f, cid, 0.0)  # actual count = 1, recorded = 99
+    s.close()
+
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+    r = runner.invoke(app, ["doctor"])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload["ok"] is False
+    assert "face_cluster_size_mismatch" in payload["issues"]
+
+    r = runner.invoke(app, ["doctor", "--fix"])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload["fix_applied"] is True
+    assert payload["issues"].get("face_cluster_size_fixed") == 1
+    s = Store(db)
+    row = s.conn.execute("SELECT size FROM face_clusters WHERE id=?", (cid,)).fetchone()
+    assert row["size"] == 1
+    s.close()
 
 
 def test_prune_dry_run_then_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

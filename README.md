@@ -50,7 +50,9 @@ uv run phototag faces detect --i-understand          # one-time consent gate
 uv run phototag faces cluster --min-size 3
 uv run phototag faces verify --apply                 # heuristic cleanup
 uv run phototag faces refine-noise                   # dry-run by default; --persist to save
+uv run phototag faces auto-attach                    # bulk identity match for orphans (dry-run; --persist to save)
 uv run phototag faces stats
+uv run phototag faces corrections --action named     # audit log dump
 uv run phototag faces clear-noise-labels             # recover from naming-noise bug
 uv run phototag faces purge [--keep-identities] --yes
 ```
@@ -68,6 +70,7 @@ uv run phototag stats --top 50 --kind label          # excludes geo
 uv run phototag query "x-ray of a hand" --limit 20   # CLIP semantic search
 uv run phototag export --format csv --out tags.csv
 uv run phototag prune --apply                        # drop rows for missing files
+uv run phototag doctor [--fix]                       # health-check the DB; --fix recomputes safe items
 ```
 
 ### Optional auth (when binding non-loopback)

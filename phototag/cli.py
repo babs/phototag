@@ -362,6 +362,110 @@ def query(
 
 
 @app.command()
+def doctor(
+    fix: Annotated[bool, typer.Option(help="apply auto-fixable issues; otherwise dry-run")] = False,
+) -> None:
+    """Walk the DB and report inconsistencies. JSON out, fixable items marked.
+
+    Checks:
+      - cluster size mismatch (face_clusters.size vs COUNT(assignments))
+      - clusters.size mismatch (image clusters)
+      - faces with no embedding (NULL or 0-dim BLOB)
+      - identities with no live cluster mention (label_user not present
+        in any face_clusters)
+      - schema_version vs MIGRATIONS length
+    `--fix` only fixes the safe cases (cluster.size recompute).
+    """
+    from . import store as _store_mod
+
+    settings = load_settings()
+    log = get_logger("phototag.doctor")
+    store = Store(settings.db_path)
+    issues: dict[str, Any] = {}
+    try:
+        # Schema version sanity.
+        row = store.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        cur_ver = int(row["value"]) if row else 0
+        expected = len(_store_mod.MIGRATIONS)
+        if cur_ver != expected:
+            issues["schema_version"] = {"current": cur_ver, "expected": expected}
+
+        # face_clusters.size vs actual assignments.
+        bad_face_clusters = store.conn.execute(
+            """
+            SELECT fc.id AS cluster_id, fc.size AS recorded,
+                   IFNULL((SELECT COUNT(*) FROM face_cluster_assignments fca
+                           WHERE fca.cluster_id = fc.id), 0) AS actual
+            FROM face_clusters fc
+            WHERE fc.size != IFNULL((SELECT COUNT(*) FROM face_cluster_assignments fca
+                                     WHERE fca.cluster_id = fc.id), 0)
+            """
+        ).fetchall()
+        if bad_face_clusters:
+            issues["face_cluster_size_mismatch"] = [dict(r) for r in bad_face_clusters]
+
+        # clusters.size vs actual image_clusters.
+        bad_img_clusters = store.conn.execute(
+            """
+            SELECT c.id AS cluster_id, c.size AS recorded,
+                   IFNULL((SELECT COUNT(*) FROM image_clusters ic
+                           WHERE ic.cluster_id = c.id), 0) AS actual
+            FROM clusters c
+            WHERE c.size != IFNULL((SELECT COUNT(*) FROM image_clusters ic
+                                    WHERE ic.cluster_id = c.id), 0)
+            """
+        ).fetchall()
+        if bad_img_clusters:
+            issues["image_cluster_size_mismatch"] = [dict(r) for r in bad_img_clusters]
+
+        # Faces with empty embedding bytes.
+        bad_emb = store.conn.execute(
+            "SELECT id FROM faces WHERE embedding IS NULL OR LENGTH(embedding) = 0"
+        ).fetchall()
+        if bad_emb:
+            issues["faces_no_embedding"] = [int(r["id"]) for r in bad_emb][:50]
+
+        # Identity rows whose name no longer appears in any face_clusters.label_user.
+        orphan_idents = store.conn.execute(
+            """
+            SELECT fi.name FROM face_identities fi
+            WHERE NOT EXISTS (
+                SELECT 1 FROM face_clusters fc WHERE fc.label_user = fi.name
+            )
+            """
+        ).fetchall()
+        if orphan_idents:
+            issues["orphan_identities"] = [r["name"] for r in orphan_idents]
+
+        if fix and bad_face_clusters:
+            with store.transaction():
+                for r in bad_face_clusters:
+                    store.conn.execute(
+                        "UPDATE face_clusters SET size = ? WHERE id = ?",
+                        (int(r["actual"]), int(r["cluster_id"])),
+                    )
+            issues["face_cluster_size_fixed"] = len(bad_face_clusters)
+        if fix and bad_img_clusters:
+            with store.transaction():
+                for r in bad_img_clusters:
+                    store.conn.execute(
+                        "UPDATE clusters SET size = ? WHERE id = ?",
+                        (int(r["actual"]), int(r["cluster_id"])),
+                    )
+            issues["image_cluster_size_fixed"] = len(bad_img_clusters)
+
+        ok = (
+            not any(k for k in issues if not k.endswith("_fixed") and k != "schema_version")
+            and "schema_version" not in issues
+        )
+        out = {"ok": ok, "issues": issues, "fix_applied": bool(fix)}
+        log.info("doctor_summary", **{"ok": ok, "n_issue_kinds": len(issues)})
+        typer.echo(json.dumps(out, indent=2, default=str))
+    finally:
+        store.close()
+
+
+@app.command()
 def info(
     image_path: Annotated[Path, typer.Argument(help="Image file path")],
 ) -> None:
@@ -757,6 +861,46 @@ def faces_corrections(
     try:
         rows = store.list_face_corrections(face_id=face_id, action=action)
         typer.echo(json.dumps(rows[:limit], indent=2, default=str))
+    finally:
+        store.close()
+
+
+@faces_app.command("auto-attach")
+def faces_auto_attach(
+    threshold: Annotated[float, typer.Option(help="min cosine sim to attach to a known identity")] = 0.5,
+    auto_verify_threshold: Annotated[
+        float,
+        typer.Option(
+            "--auto-verify-threshold",
+            help="sim ≥ this also flips user_verified=1 (default 0.7)",
+        ),
+    ] = 0.7,
+    limit: Annotated[int | None, typer.Option(help="cap orphan rows scanned")] = None,
+    persist: Annotated[bool, typer.Option("--persist", help="actually attach; default is dry-run")] = False,
+) -> None:
+    """Bulk-attach orphan faces to known identities by centroid match.
+
+    Default is a dry-run that prints projected per-identity counts +
+    similarity ranges. `--persist` writes assignments + audit rows + flips
+    user_verified for high-confidence matches. Heavy lifting is one
+    vectorized cosine matmul (`(N_orphans, D) @ (D, N_idents)`); on a
+    1500-orphan / 50-identity DB this is well under a second.
+    """
+    from .faces import auto_attach_orphans
+
+    settings = load_settings()
+    log = get_logger("phototag.faces")
+    store = Store(settings.db_path)
+    try:
+        result = auto_attach_orphans(
+            store,
+            threshold=threshold,
+            auto_verify_threshold=auto_verify_threshold,
+            limit=limit,
+            dry_run=not persist,
+        )
+        log.info("faces_auto_attach_summary", **{k: v for k, v in result.items() if k != "by_identity"})
+        typer.echo(json.dumps(result, indent=2, default=str))
     finally:
         store.close()
 

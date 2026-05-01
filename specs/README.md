@@ -22,6 +22,7 @@ Local, scriptable photo-tagging tool. Scans a library, tags via RAM++, derives a
 | 13 | [risks.md](13-risks.md) | Risks, mitigations |
 | 14 | [testing.md](14-testing.md) | Test strategy |
 | 15 | [faces.md](15-faces.md) | v2 face detection / recognition / clustering (opt-in) |
+| 16 | [improvement-plan.md](16-improvement-plan.md) | Forward-looking work items, status, picking the next sprint |
 
 ## Source
 

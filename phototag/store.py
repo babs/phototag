@@ -695,24 +695,31 @@ class Store:
         # Picking globally-latest-run can hide a face that's in an older
         # run but not in a newer one (the common case after a manual run is
         # created on top of an auto-cluster).
+        # `distance` and `run_is_manual` are surfaced so the UI can show the
+        # cosine confidence when the face came through `attach_face_to_best_identity`
+        # (manual run, distance = 1.0 - cosine_sim).
         cur = self.conn.execute(
             """
             WITH ranked AS (
                 SELECT
                     fca.face_id,
+                    fca.distance AS distance,
                     fc.id   AS cluster_id,
                     fc.cluster_no,
                     fc.label_user,
                     fc.label_auto,
                     fc.run_id,
+                    fr.params_json AS run_params,
                     ROW_NUMBER() OVER (
                         PARTITION BY fca.face_id ORDER BY fc.run_id DESC
                     ) AS rn
                 FROM face_cluster_assignments fca
                 JOIN face_clusters fc ON fc.id = fca.cluster_id
+                JOIN face_runs fr ON fr.id = fc.run_id
             )
             SELECT f.id, f.bbox_json, f.det_score, f.verified, f.user_verified,
-                   r.cluster_id, r.cluster_no, r.label_user, r.label_auto
+                   r.cluster_id, r.cluster_no, r.label_user, r.label_auto,
+                   r.distance, r.run_params
             FROM faces f
             LEFT JOIN ranked r ON r.face_id = f.id AND r.rn = 1
             WHERE f.image_id = ?
@@ -725,6 +732,17 @@ class Store:
                 bbox = json.loads(row["bbox_json"])
             except json.JSONDecodeError:
                 bbox = None
+            # Distance is sim-derived only when the assignment is in a manual
+            # run; otherwise it's an Euclidean UMAP distance (different scale).
+            distance = row["distance"] if "distance" in row.keys() else None
+            run_params = row["run_params"] if "run_params" in row.keys() else None
+            attach_sim: float | None = None
+            if distance is not None and run_params:
+                try:
+                    if json.loads(run_params).get("manual"):
+                        attach_sim = max(0.0, min(1.0, 1.0 - float(distance)))
+                except json.JSONDecodeError:
+                    pass
             out.append(
                 {
                     "id": int(row["id"]),
@@ -736,6 +754,7 @@ class Store:
                     "cluster_no": row["cluster_no"],
                     "label_user": row["label_user"],
                     "label_auto": row["label_auto"],
+                    "attach_sim": attach_sim,
                 }
             )
         return out
