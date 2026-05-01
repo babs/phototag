@@ -185,14 +185,16 @@ async function showCurrentLightbox() {
     `<span class="tag" onclick="toggleTag('${escape(t.name)}'); closeLightbox();">${escape(t.name)} <span class="count">${t.score.toFixed(2)}</span></span>`
   ).join('');
   const facesActions = [];
+  // Order: tags toggle (always relevant) → face toggle + face-specific actions
+  // grouped together → re-detect at the end (the heavy / least-frequent op).
+  if (info.tags && info.tags.length > 0) {
+    const op = state.tagsVisible ? '1' : '0.5';
+    facesActions.push(`<a href="#" id="info-toggle-tags" onclick="event.preventDefault(); toggleTagsCloud();" style="color:#9cf; opacity:${op};">${info.tags.length} (T)ags</a>`);
+  }
   if (faces && faces.length > 0) {
     const op = state.facesVisible ? '1' : '0.5';
     facesActions.push(`<a href="#" id="info-toggle-faces" onclick="event.preventDefault(); toggleFaceOverlays();" style="color:#9cf; opacity:${op};">${faces.length} (F)aces</a>`);
     facesActions.push(`<a href="#" onclick="event.preventDefault(); deleteAllFacesOnImage(${id});" style="color:#fca5a5;">drop ${faces.length} face${faces.length === 1 ? '' : 's'}</a>`);
-  }
-  if (info.tags && info.tags.length > 0) {
-    const op = state.tagsVisible ? '1' : '0.5';
-    facesActions.push(`<a href="#" id="info-toggle-tags" onclick="event.preventDefault(); toggleTagsCloud();" style="color:#9cf; opacity:${op};">${info.tags.length} (T)ags</a>`);
   }
   facesActions.push(`<a href="#" onclick="event.preventDefault(); redetectFaces(${id});" style="color:#9cf;">re-detect faces</a>`);
   const facesActionStr = facesActions.length ? ' · ' + facesActions.join(' · ') : '';
