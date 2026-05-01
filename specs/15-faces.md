@@ -165,6 +165,12 @@ POST   /api/faces/{face_id}/name                  → manual cluster, when no
 
 POST   /api/faces/{face_id}/verify                → user_verified=1 + audit log
 POST   /api/faces/{face_id}/unverify              → user_verified=NULL + audit
+GET    /api/faces/{face_id}/suggest?k=3           → top-K identity suggestions
+                                                    by cosine vs face_identities
+                                                    centroids. No threshold —
+                                                    caller decides. Returns
+                                                    [{name, sim, n_samples}, …]
+                                                    sorted by sim desc.
 
 GET    /api/images/{id}/faces                     → faces on this image
                                                     (now includes user_verified)

@@ -10,7 +10,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | # | Item | Status | Effort | Notes |
 |---|---|---|---|---|
 | 1 | Confidence badge in face overlay | 🟢 | 0.5 h | `attach_face_to_best_identity` returns `{name, sim, user_verified}`; `list_faces_for_image` surfaces `attach_sim` for manual-run assignments; JS shows `· 0.86` after the label |
-| 2 | "Did you mean: …" top-K suggestions in popover | ⬜ | 1 h | new `GET /api/faces/{id}/suggest?k=3` runs cosine vs identity centroids; popover renders 3 one-click attach buttons |
+| 2 | "Did you mean: …" top-K suggestions in popover | 🟢 | 1 h | `GET /api/faces/{id}/suggest?k=3` runs cosine vs identity centroids (vectorized); popover renders one-click chips that reuse the manual-name path (detach-from-noise + auto-validate) |
 | 3 | Bulk auto-attach orphan faces | 🟢 | 1 h | `phototag faces auto-attach [--persist]` + `POST /api/faces/auto-attach-orphans?dry_run=`; vectorized cosine matmul |
 | 4 | Per-identity threshold tuning | ⬜ | 4 h | track per-identity sim distribution; raise auto-validate threshold for high-variance identities (kids growing, etc.) |
 | 5 | Hard-negative mining from `face_corrections` (tier-2 sticky) | ⬜ | 4 h | `unassigned` rows penalize that identity for the same face on future passes; informs both `attach_face_to_best_identity` and `cluster_faces` |
@@ -22,7 +22,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | # | Item | Status | Effort | Notes |
 |---|---|---|---|---|
 | 8 | "Next unidentified" key (N) | 🟢 | 0.5 h | jumps to next photo with ≥1 orphan face within current view; falls back to loading the orphan photo list |
-| 9 | Validate-and-advance | ⬜ | 0.5 h | clicking V (validate) auto-advances popover to next un-verified named face on the same image |
+| 9 | Validate-and-advance | 🟢 | 0.5 h | clicking V (validate) auto-advances popover to next un-verified named face on the same image; falls back to plain close+refresh when nothing is left |
 | 10 | Photo triage queue | ⬜ | 1 h | workspace mode: photos with ≥1 ⚠ dup OR ≥1 unverified named face, sorted by face count desc, walked with J/K |
 | 11 | Identity gallery edge view | ⬜ | 1 h | on `/api/people/by-name/{name}` show 9 most-distant-from-centroid faces (the ambiguous edge) for quick triage |
 | 12 | Re-cluster preview members | ⬜ | 4 h | dry-run output already has cluster IDs; UI expander showing the ~5 faces nearest each centroid before persisting |
