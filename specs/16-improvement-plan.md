@@ -35,7 +35,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | 14 | Vectorized cosine for bulk attach | 🟢 | 1 h | one `(N, D) @ (D, M)` matmul; ~50× faster than the per-face Python loop |
 | 15 | Identity `n_samples` cap for blend | ⬜ | 0.5 h | cap at e.g. 200 in the centroid-blend math (keep raw counter for display); lets identities slowly drift as the person ages |
 | 16 | `cluster_assignments.distance` metric coherence | ⬜ | 4 h | mixes Euclidean (UMAP) and cosine (manual). Either normalize to z-score within cluster or add a `distance_kind` column |
-| 17 | `face_corrections` retention compactor | ⬜ | 0.5 h | `phototag faces corrections compact` keeps only the most-recent action per face_id; mirrors the dedup the sticky pass does anyway |
+| 17 | `face_corrections` retention compactor | 🟢 | 0.5 h | `phototag faces corrections-compact [--apply]` collapses to one row per face_id (most-recent wins); mirrors the dedup the sticky pass does anyway |
 | 18 | Sticky-pass scan budget | 🟢 | 0.5 h | SQL filter to `action IN ('named','unassigned')`; per-face dedup tightened so `verified` rows can't mask older `named` |
 
 ## Operational
