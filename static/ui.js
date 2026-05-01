@@ -189,11 +189,13 @@ async function showCurrentLightbox() {
   // grouped together → re-detect at the end (the heavy / least-frequent op).
   if (info.tags && info.tags.length > 0) {
     const op = state.tagsVisible ? '1' : '0.5';
-    facesActions.push(`<a href="#" id="info-toggle-tags" onclick="event.preventDefault(); toggleTagsCloud();" style="color:#9cf; opacity:${op};">${info.tags.length} (T)ags</a>`);
+    const noun = info.tags.length === 1 ? '(T)ag' : '(T)ags';
+    facesActions.push(`<a href="#" id="info-toggle-tags" onclick="event.preventDefault(); toggleTagsCloud();" style="color:#9cf; opacity:${op};">${info.tags.length} ${noun}</a>`);
   }
   if (faces && faces.length > 0) {
     const op = state.facesVisible ? '1' : '0.5';
-    facesActions.push(`<a href="#" id="info-toggle-faces" onclick="event.preventDefault(); toggleFaceOverlays();" style="color:#9cf; opacity:${op};">${faces.length} (F)aces</a>`);
+    const noun = faces.length === 1 ? '(F)ace' : '(F)aces';
+    facesActions.push(`<a href="#" id="info-toggle-faces" onclick="event.preventDefault(); toggleFaceOverlays();" style="color:#9cf; opacity:${op};">${faces.length} ${noun}</a>`);
     facesActions.push(`<a href="#" onclick="event.preventDefault(); deleteAllFacesOnImage(${id});" style="color:#fca5a5;">drop ${faces.length} face${faces.length === 1 ? '' : 's'}</a>`);
   }
   facesActions.push(`<a href="#" onclick="event.preventDefault(); redetectFaces(${id});" style="color:#9cf;">re-detect faces</a>`);
