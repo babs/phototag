@@ -162,17 +162,19 @@ def prune(
         if limit is not None:
             rows = rows[:limit]
         counts["checked"] = len(rows)
+        # Single existence check per row (re-checking on --apply could double
+        # the cost on a slow / network-mounted corpus).
+        missing_ids: list[int] = []
         for r in rows:
-            if Path(r.path).exists():
-                continue
-            counts["missing"] += 1
-            missing_paths.append(r.path)
-        if apply and missing_paths:
+            if not Path(r.path).exists():
+                missing_ids.append(r.id)
+                missing_paths.append(r.path)
+        counts["missing"] = len(missing_ids)
+        if apply and missing_ids:
             with store.transaction():
-                for r in rows:
-                    if not Path(r.path).exists():
-                        store.delete_image(r.id)
-                        counts["deleted"] += 1
+                for image_id in missing_ids:
+                    store.delete_image(image_id)
+                    counts["deleted"] += 1
         log.info("prune_summary", apply=apply, **counts)
         payload: dict[str, Any] = {**counts, "missing_paths": missing_paths[:50]}
         if not apply and counts["missing"]:
@@ -192,6 +194,8 @@ def list_images(
     """List images filtered by tag(s)."""
     if not tag:
         raise typer.BadParameter("--tag is required (one or more)")
+    if fmt not in ("json", "tsv"):
+        raise typer.BadParameter("--format must be 'json' or 'tsv'")
     settings = load_settings()
     store = Store(settings.db_path)
     try:
@@ -211,6 +215,8 @@ def stats(
     kind: Annotated[str | None, typer.Option(help="filter tag kind: label | geo (default: all)")] = None,
 ) -> None:
     """Tag distribution + corpus counts."""
+    if kind is not None and kind not in ("label", "geo"):
+        raise typer.BadParameter("--kind must be 'label' or 'geo'")
     settings = load_settings()
     store = Store(settings.db_path)
     try:
@@ -237,23 +243,39 @@ def export(
     import csv
     import io
 
+    if fmt not in ("json", "csv"):
+        raise typer.BadParameter("--format must be 'json' or 'csv'")
     settings = load_settings()
     store = Store(settings.db_path)
     try:
+        # Single bulk SELECT instead of N+1 list_image_tags() calls so a 10k-
+        # row export takes one round-trip instead of 10k.
         rows = list(store.iter_images())
-        records: list[dict[str, Any]] = []
-        for r in rows:
-            tags = [{"name": n, "score": s} for n, s in store.list_image_tags(r.id, min_score=min_score)]
-            records.append(
-                {
-                    "id": r.id,
-                    "path": r.path,
-                    "hash": r.hash,
-                    "width": r.width,
-                    "height": r.height,
-                    "tags": tags,
-                }
+        cur = store.conn.execute(
+            """
+            SELECT it.image_id, t.name, it.score
+            FROM image_tags it JOIN tags t ON t.id = it.tag_id
+            WHERE it.score >= ?
+            ORDER BY it.image_id, it.score DESC
+            """,
+            (float(min_score),),
+        )
+        tags_by_image: dict[int, list[dict[str, Any]]] = {}
+        for row in cur:
+            tags_by_image.setdefault(int(row["image_id"]), []).append(
+                {"name": row["name"], "score": float(row["score"])}
             )
+        records: list[dict[str, Any]] = [
+            {
+                "id": r.id,
+                "path": r.path,
+                "hash": r.hash,
+                "width": r.width,
+                "height": r.height,
+                "tags": tags_by_image.get(r.id, []),
+            }
+            for r in rows
+        ]
         if fmt == "csv":
             buf = io.StringIO()
             w = csv.writer(buf)
@@ -289,10 +311,22 @@ def query(
         str | None, typer.Option("--embedder", help="embedder model_name (auto: most populated)")
     ] = None,
 ) -> None:
-    """Semantic search by text against cached CLIP embeddings."""
+    """Semantic search by text against cached CLIP embeddings.
+
+    Note: the first call boots the CLIP text encoder (~2-3 s on CPU). Long
+    queries are truncated by the CLIP tokenizer at 77 tokens; a one-line
+    warning is printed when the input exceeds ~200 chars.
+    """
     import numpy as np
 
     from .models.clip import ClipEmbedder
+
+    if len(text) > 200:
+        typer.echo(
+            f"warn: query is {len(text)} chars; CLIP truncates at 77 tokens (~250 chars). "
+            "consider shortening for tighter relevance.",
+            err=True,
+        )
 
     settings = load_settings()
     store = Store(settings.db_path)

@@ -143,22 +143,31 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     if api_token:
         # Lightweight shared-secret guard. Disabled by default (the local-
         # loopback case). When set, every request except the index page,
-        # /healthz and /static/* must carry the token via either:
+        # /healthz, /static/* and CORS preflights (OPTIONS) must carry the
+        # token via either:
         #   - X-API-Token header (preferred for fetch/XHR)
         #   - ?token=<value> query string (so <img> loads work in the SPA)
         # The token is also injected into the index template so the JS can
         # read it and decorate fetch/asset URLs automatically.
+        import secrets as _secrets
+
         from starlette.middleware.base import BaseHTTPMiddleware
 
-        _PUBLIC = ("/", "/healthz", "/static", "/favicon.ico")
+        _PUBLIC = ("/", "/healthz", "/favicon.ico")
+        _expected_token: str = api_token  # narrow for mypy under closure
 
         class _AuthMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request: Request, call_next: Any) -> Any:
                 p = request.url.path
-                if p in _PUBLIC or p.startswith("/static/"):
+                # Let CORS preflight reach CORSMiddleware (which is registered
+                # as inner middleware here) without needing a token. Native
+                # asset loads (img/css) and the SPA shell are also public.
+                if request.method == "OPTIONS" or p in _PUBLIC or p.startswith("/static/"):
                     return await call_next(request)
-                got = request.headers.get("X-API-Token") or request.query_params.get("token")
-                if got != api_token:
+                got = request.headers.get("X-API-Token") or request.query_params.get("token", "") or ""
+                # constant-time comparison so a timing oracle can't probe the
+                # token byte-by-byte.
+                if not _secrets.compare_digest(got, _expected_token):
                     return Response(status_code=401, content="missing or wrong API token")
                 return await call_next(request)
 
@@ -488,6 +497,9 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 keep_validated.add(int(v["id"]))
                 consumed_new.add(best)
 
+        from .faces import attach_face_to_best_identity
+
+        attached: list[dict[str, Any]] = []
         with s.transaction():
             # Drop every non-validated face first.
             s.delete_non_verified_faces_for_image(image_id, MODEL_NAME)
@@ -495,12 +507,33 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             for v in validated:
                 if int(v["id"]) not in keep_validated:
                     s.delete_face(int(v["id"]))
-            # Insert new detections that did NOT match a kept validated face.
+            # Hoist the manual face_run lookup so the inner loop doesn't
+            # re-query it per face.
+            run_row = s.conn.execute(
+                "SELECT id FROM face_runs WHERE json_extract(params_json,'$.manual') = 1 "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            from .faces import MODEL_NAME as _M
+
+            manual_run_id = (
+                int(run_row["id"])
+                if run_row
+                else s.create_face_run(
+                    {"manual": True, "model": _M}, _dt.now(UTC).isoformat(timespec="seconds")
+                )
+            )
+            # Insert new detections that did NOT match a kept validated face,
+            # then immediately try to auto-attach each to a known identity by
+            # cosine sim against face_identities centroids — so a freshly-
+            # detected "Alex" face gets the name without waiting for a
+            # full `phototag faces cluster` run. High-confidence matches
+            # (sim >= 0.7) are auto-validated; marginal matches stay "?" so
+            # the user reviews via the validate-named bulk action.
             inserted = 0
             for j, f in enumerate(new_faces):
                 if j in consumed_new:
                     continue
-                s.insert_face(
+                fid = s.insert_face(
                     image_id=image_id,
                     bbox=f.bbox,
                     det_score=f.det_score,
@@ -509,6 +542,11 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     landmarks=f.landmarks,
                 )
                 inserted += 1
+                hit = attach_face_to_best_identity(
+                    s, fid, f.embedding, image_id=image_id, manual_run_id=manual_run_id
+                )
+                if hit is not None:
+                    attached.append(hit)
         log.info(
             "face_redetected",
             image_id=image_id,
@@ -516,6 +554,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             validated_kept=len(keep_validated),
             validated_dropped=len(validated) - len(keep_validated),
             inserted=inserted,
+            auto_attached=len(attached),
         )
         return {
             "image_id": image_id,
@@ -523,6 +562,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             "validated_kept": len(keep_validated),
             "validated_dropped": len(validated) - len(keep_validated),
             "inserted": inserted,
+            "auto_attached": attached,
         }
 
     @app.post("/api/faces/{face_id}/verify")

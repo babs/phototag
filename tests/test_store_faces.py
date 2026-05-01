@@ -213,6 +213,81 @@ def test_unassign_face_from_run(tmp_db: Path) -> None:
         store.close()
 
 
+def test_attach_face_to_best_identity(tmp_db: Path) -> None:
+    """High-confidence match attaches AND auto-validates; marginal match
+    attaches without validating; no match returns None."""
+    from phototag.faces import attach_face_to_best_identity
+
+    store = Store(tmp_db)
+    try:
+        anne = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        store.upsert_face_identity("Anne", anne, n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+
+        # 1) Strong match (sim ≈ 0.998) → attached + auto-validated.
+        emb = np.array([0.95, 0.05, 0.0], dtype=np.float32)
+        fid = store.insert_face(
+            image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=emb, model_name="m"
+        )
+        hit = attach_face_to_best_identity(store, fid, emb, image_id=img)
+        assert hit is not None and hit["name"] == "Anne"
+        assert hit["user_verified"] is True
+        rows = store.list_faces_for_image(img)
+        assert rows[0]["label_user"] == "Anne"
+        assert rows[0]["user_verified"] == 1
+        # Audit row carries image_id (no post-hoc UPDATE needed).
+        audit = [a for a in store.list_face_corrections(face_id=fid) if a["action"] == "named"]
+        assert audit and audit[0]["image_id"] == img
+
+        # 2) Marginal match (sim = 0.6, between 0.5 and 0.7) → attached, not validated.
+        marginal = np.array([0.6, 0.8, 0.0], dtype=np.float32)
+        # Cosine to anne ([1,0,0]) = 0.6 / sqrt(1) / sqrt(0.36+0.64) = 0.6
+        fid2 = store.insert_face(
+            image_id=img, bbox=[40, 40, 10, 10], det_score=0.9, embedding=marginal, model_name="m"
+        )
+        hit2 = attach_face_to_best_identity(
+            store, fid2, marginal, image_id=img, threshold=0.5, auto_verify_threshold=0.7
+        )
+        assert hit2 is not None and hit2["name"] == "Anne"
+        assert hit2["user_verified"] is False
+
+        # 3) No identity in range → None, stays orphan.
+        far = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        fid3 = store.insert_face(
+            image_id=img, bbox=[20, 20, 10, 10], det_score=0.9, embedding=far, model_name="m"
+        )
+        assert attach_face_to_best_identity(store, fid3, far, image_id=img, threshold=0.5) is None
+
+        # 4) dim-mismatched identity is skipped silently (defensive).
+        store.upsert_face_identity("WrongDim", np.array([1.0, 0.0], dtype=np.float32), n_samples=1)
+        fid4 = store.insert_face(
+            image_id=img,
+            bbox=[60, 60, 10, 10],
+            det_score=0.9,
+            embedding=np.array([0.99, 0.01, 0.01], dtype=np.float32),
+            model_name="m",
+        )
+        # Should still resolve to Anne (3-d), ignoring WrongDim (2-d).
+        hit4 = attach_face_to_best_identity(
+            store, fid4, np.array([0.99, 0.01, 0.01], dtype=np.float32), image_id=img
+        )
+        assert hit4 is not None and hit4["name"] == "Anne"
+
+        # 5) Empty identities table → None.
+        store.delete_face_identity("Anne")
+        store.delete_face_identity("WrongDim")
+        fid5 = store.insert_face(
+            image_id=img,
+            bbox=[80, 80, 10, 10],
+            det_score=0.9,
+            embedding=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+            model_name="m",
+        )
+        assert attach_face_to_best_identity(store, fid5, np.array([1.0, 0.0, 0.0], dtype=np.float32)) is None
+    finally:
+        store.close()
+
+
 def test_purge_faces(tmp_db: Path) -> None:
     store = Store(tmp_db)
     try:

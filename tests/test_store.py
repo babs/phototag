@@ -66,6 +66,38 @@ def test_replace_image_tags(tmp_db: Path) -> None:
         store.close()
 
 
+def test_delete_image_cascades(tmp_db: Path) -> None:
+    """Deleting an image must cascade to tags / faces / embeddings via FK."""
+    store = Store(tmp_db)
+    try:
+        iid = store.upsert_image(
+            path="/tmp/del.jpg",
+            hash_="d",
+            mtime=1.0,
+            width=10,
+            height=10,
+            exif=None,
+            processed_at=_now(),
+        )
+        store.replace_image_tags(iid, "ram_v1", [("cat", 0.9)])
+        store.upsert_embedding(iid, "clip_v1", np.array([0.1, 0.2], dtype=np.float32))
+        store.insert_face(
+            image_id=iid,
+            bbox=[0, 0, 10, 10],
+            det_score=0.9,
+            embedding=np.ones(2, dtype=np.float32),
+            model_name="m",
+        )
+        with store.transaction():
+            store.delete_image(iid)
+        assert store.get_image(iid) is None
+        assert store.list_image_tags(iid) == []
+        assert not store.has_embedding(iid, "clip_v1")
+        assert not store.has_faces(iid, "m")
+    finally:
+        store.close()
+
+
 def test_embedding_roundtrip(tmp_db: Path) -> None:
     store = Store(tmp_db)
     try:

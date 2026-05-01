@@ -356,9 +356,14 @@ def cluster_faces(
 
     # Tier-1 sticky-label post-pass: replay user corrections so a 'named'
     # action you took last week survives this re-cluster, and an 'unassigned'
-    # face doesn't slip back into the same wrong identity.
-    with store.transaction():
-        sticky = apply_sticky_corrections(store, run_id)
+    # face doesn't slip back into the same wrong identity. Failure here must
+    # not invalidate the cluster run itself — log loudly and move on.
+    sticky: dict[str, int] = {"named": 0, "unassigned": 0}
+    try:
+        with store.transaction():
+            sticky = apply_sticky_corrections(store, run_id)
+    except Exception as e:
+        log.error("sticky_pass_failed", run_id=run_id, error=str(e))
 
     log.info(
         "faces_cluster_done",
@@ -547,8 +552,12 @@ def cluster_orphan_faces(
                 store.upsert_face_identity(label_user, blended, n_samples=n_old + len(m))
 
     # Tier-1 sticky-label post-pass on the orphan run too.
-    with store.transaction():
-        sticky = apply_sticky_corrections(store, run_id)
+    sticky: dict[str, int] = {"named": 0, "unassigned": 0}
+    try:
+        with store.transaction():
+            sticky = apply_sticky_corrections(store, run_id)
+    except Exception as e:
+        log.error("sticky_pass_failed", run_id=run_id, error=str(e))
 
     log.info(
         "faces_orphan_recluster_done",
@@ -591,14 +600,19 @@ def apply_sticky_corrections(store: Store, run_id: int) -> dict[str, int]:
     ).fetchone()
     noise_cid = int(noise_row["id"]) if noise_row else None
 
-    corrections = store.list_face_corrections()
-    # Most-recent-first → keep the latest user intent per face.
+    # Fetch only the actions this pass actually consumes — `verified` /
+    # `unverified` / `deleted` rows would otherwise mask older `named` /
+    # `unassigned` rows under the per-face dedup. SQL also caps the scan to
+    # the relevant action set so a long-lived corrections table doesn't slow
+    # down every cluster_faces call linearly.
+    corrections = [c for c in store.list_face_corrections() if c["action"] in ("named", "unassigned")]
+    # Most-recent-first (list_face_corrections returns ORDER BY id DESC)
+    # → keep the latest user intent per face.
     seen: set[int] = set()
     for c in corrections:
         fid = c.get("face_id")
-        if fid is None or fid in seen:
+        if fid is None or int(fid) in seen:
             continue
-        seen.add(int(fid))
         action = c["action"]
         # Map face_id → its cluster in *this* run (window pick).
         row = store.conn.execute(
@@ -615,21 +629,142 @@ def apply_sticky_corrections(store: Store, run_id: int) -> dict[str, int]:
             continue
         cid = int(row["cid"])
         cur_label = row["label_user"]
+        applied = False
         if action == "named" and c.get("name"):
             if cur_label != c["name"]:
                 store.set_face_cluster_label_user(cid, str(c["name"]))
                 counts["named"] += 1
-        elif action == "unassigned" and noise_cid is not None and cid != noise_cid:
-            # Park the face under noise within this run.
-            store.conn.execute(
-                "DELETE FROM face_cluster_assignments WHERE face_id=? AND cluster_id=?",
-                (int(fid), cid),
-            )
-            store.conn.execute("UPDATE face_clusters SET size = MAX(0, size - 1) WHERE id=?", (cid,))
-            store.assign_face_to_cluster(int(fid), noise_cid, distance=0.0)
-            store.conn.execute("UPDATE face_clusters SET size = size + 1 WHERE id=?", (noise_cid,))
-            counts["unassigned"] += 1
+                applied = True
+            else:
+                applied = True  # already correct → still consumes the per-face slot
+        elif action == "unassigned":
+            if noise_cid is None:
+                # No noise cluster in this run (HDBSCAN packed everyone) —
+                # nowhere to park the un-assignment. Don't mark the face as
+                # `seen` so a later pass with noise can replay this row.
+                continue
+            if cid != noise_cid:
+                store.conn.execute(
+                    "DELETE FROM face_cluster_assignments WHERE face_id=? AND cluster_id=?",
+                    (int(fid), cid),
+                )
+                store.conn.execute("UPDATE face_clusters SET size = MAX(0, size - 1) WHERE id=?", (cid,))
+                store.assign_face_to_cluster(int(fid), noise_cid, distance=0.0)
+                store.conn.execute("UPDATE face_clusters SET size = size + 1 WHERE id=?", (noise_cid,))
+                counts["unassigned"] += 1
+            applied = True
+        if applied:
+            seen.add(int(fid))
     return counts
+
+
+def attach_face_to_best_identity(
+    store: Store,
+    face_id: int,
+    embedding: np.ndarray,
+    *,
+    image_id: int | None = None,
+    threshold: float = 0.5,
+    auto_verify_threshold: float = 0.7,
+    manual_run_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Auto-cluster a single fresh face into a known identity.
+
+    Returns a small report dict (`{"name", "sim", "user_verified"}`) on a
+    match, or None if no identity is close enough.
+
+    Two thresholds:
+      - `threshold` (default 0.5): minimum cosine similarity to attach at all.
+      - `auto_verify_threshold` (default 0.7): minimum sim to *also* mark
+        the face `user_verified=1`. Below this band the face attaches to the
+        identity but stays in the "?" not-yet-validated state so the user
+        sees it as a suggestion to confirm.
+
+    `image_id` is written into the audit row directly (cleaner than
+    rewriting NULL post-hoc).
+
+    `manual_run_id` lets a caller looping over many faces hoist the manual-
+    run lookup once; defaults to per-call lookup.
+
+    Identities whose centroid `dim` doesn't match the face embedding are
+    skipped silently (defensive: protects against legacy DB rows).
+    """
+    identities = store.list_face_identities()
+    if not identities:
+        return None
+    emb = np.asarray(embedding, dtype=np.float32)
+    edim = int(emb.shape[0])
+
+    best_name: str | None = None
+    best_sim = -1.0
+    best_centroid: np.ndarray | None = None
+    best_n = 0
+    for ident in identities:
+        if int(ident.get("dim", 0)) != edim:
+            continue
+        sim = _cosine_sim(emb, ident["centroid"])
+        if sim > best_sim:
+            best_sim = sim
+            best_name = str(ident["name"])
+            best_centroid = np.asarray(ident["centroid"], dtype=np.float32)
+            best_n = int(ident.get("n_samples", 0)) or 0
+    if best_name is None or best_sim < threshold or best_centroid is None:
+        return None
+
+    # Locate or create the manual face_run (same one the manual-name path uses).
+    if manual_run_id is None:
+        row = store.conn.execute(
+            "SELECT id FROM face_runs WHERE json_extract(params_json,'$.manual') = 1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        manual_run_id = (
+            int(row["id"])
+            if row
+            else store.create_face_run({"manual": True, "model": MODEL_NAME}, _now_iso())
+        )
+
+    # Locate or create the same-name cluster in this manual run.
+    crow = store.conn.execute(
+        "SELECT id, size FROM face_clusters WHERE run_id=? AND label_user=?",
+        (manual_run_id, best_name),
+    ).fetchone()
+    if crow:
+        cid = int(crow["id"])
+        store.assign_face_to_cluster(face_id, cid, distance=float(1.0 - best_sim))
+        store.conn.execute("UPDATE face_clusters SET size = size + 1 WHERE id = ?", (cid,))
+    else:
+        max_no = store.conn.execute(
+            "SELECT IFNULL(MAX(cluster_no), -1) AS m FROM face_clusters WHERE run_id=?",
+            (manual_run_id,),
+        ).fetchone()
+        cluster_no = int(max_no["m"]) + 1
+        cid = store.add_face_cluster(
+            run_id=manual_run_id,
+            cluster_no=cluster_no,
+            size=1,
+            label_auto=best_name,
+            label_user=best_name,
+        )
+        store.assign_face_to_cluster(face_id, cid, distance=float(1.0 - best_sim))
+
+    # Sample-weighted centroid update (same shape as cluster_faces).
+    blended = ((best_centroid * best_n + emb) / max(1, best_n + 1)).astype(np.float32, copy=False)
+    store.upsert_face_identity(best_name, blended, n_samples=best_n + 1)
+
+    # Auto-validate only when the match is comfortably above threshold —
+    # marginal matches (sim in [threshold, auto_verify_threshold)) attach to
+    # the identity but stay un-validated so the user reviews them via the "?"
+    # marker and the validate-named bulk action.
+    auto_validated = best_sim >= auto_verify_threshold
+    if auto_validated:
+        store.set_face_user_verified(face_id, 1)
+    store.log_face_correction(
+        face_id=face_id,
+        image_id=image_id,
+        action="named",
+        cluster_id=cid,
+        name=best_name,
+    )
+    return {"name": best_name, "sim": float(best_sim), "user_verified": auto_validated}
 
 
 def name_cluster(store: Store, cluster_id: int, name: str | None) -> None:
@@ -761,6 +896,7 @@ __all__ = [
     "cluster_faces",
     "cluster_orphan_faces",
     "apply_sticky_corrections",
+    "attach_face_to_best_identity",
     "name_cluster",
     "verify_faces",
     "crop_face",
