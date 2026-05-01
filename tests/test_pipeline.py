@@ -214,3 +214,45 @@ def test_scan_then_embed_full_pipeline(tmp_path: Path, tmp_db: Path) -> None:
             pytest.fail("did not find the 8x8 image in the DB")
     finally:
         store.close()
+
+
+def test_decode_one_handles_hash_failure(tmp_path: Path) -> None:
+    """`hash_file` raising (file vanished, permission denied, network drive
+    flake) used to crash the producer thread and silently report
+    `failed=0`. `_decode_one` now catches OSError and returns (sf, None,
+    None) so the per-image fail counter is accurate."""
+    from phototag.pipeline import _decode_one
+    from phototag.scanner import ScannedFile
+
+    # Reference a path that doesn't exist — `hash_file` will OSError on open.
+    ghost = tmp_path / "ghost.jpg"
+    sf = ScannedFile(path=ghost, size=0, mtime=0.0)
+    result = _decode_one(sf)
+    assert result == (sf, None, None)
+
+
+def test_scan_and_tag_surfaces_producer_crash_in_failed(
+    tmp_path: Path, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the decode producer crashes mid-stream (a non-OSError that
+    `_decode_one` doesn't catch), the run summary must NOT report
+    `failed=0` — the unseen-files count is accounted for in `failed`."""
+    from phototag import pipeline
+
+    _seed_corpus(tmp_path / "corpus", n=4)
+
+    def boom(sf: object) -> object:
+        raise RuntimeError("synthetic decode failure")
+
+    monkeypatch.setattr(pipeline, "_decode_one", boom)
+
+    store = Store(tmp_db)
+    try:
+        counts = pipeline.scan_and_tag(tmp_path / "corpus", store, FakeTagger(threshold=0.0))
+        # Producer dies before any batch lands → seen_files = 0,
+        # `failed` covers all 4 files. Tagged stays 0.
+        assert counts["scanned"] == 4
+        assert counts["tagged"] == 0
+        assert counts["failed"] == 4
+    finally:
+        store.close()

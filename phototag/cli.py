@@ -684,21 +684,42 @@ def rename_bulk(
     """Bulk-rename clusters from a JSON file."""
     import json as _json
 
-    mapping = _json.loads(json_path.read_text())
+    # Surface bad input as clean exit codes, not Python tracebacks.
+    try:
+        raw = json_path.read_text()
+    except OSError as e:
+        typer.echo(f"error: cannot read {json_path}: {e}", err=True)
+        raise typer.Exit(1) from e
+    try:
+        mapping = _json.loads(raw)
+    except _json.JSONDecodeError as e:
+        typer.echo(f"error: invalid JSON in {json_path}: {e}", err=True)
+        raise typer.Exit(1) from e
+    if not isinstance(mapping, dict):
+        typer.echo(f"error: {json_path} must contain a JSON object {{cluster_id: label_user}}", err=True)
+        raise typer.Exit(1)
+
     settings = load_settings()
     store = Store(settings.db_path)
     n = 0
+    skipped: list[str] = []
     try:
         with store.transaction():
             for k, v in mapping.items():
-                cid = int(k)
+                try:
+                    cid = int(k)
+                except (TypeError, ValueError):
+                    skipped.append(f"non-numeric key {k!r}")
+                    continue
                 if store.get_cluster(cid) is None:
-                    typer.echo(f"  skip: cluster {cid} not found", err=True)
+                    skipped.append(f"cluster {cid} not found")
                     continue
                 store.set_cluster_label_user(cid, v if v else None)
                 n += 1
     finally:
         store.close()
+    for s in skipped:
+        typer.echo(f"  skip: {s}", err=True)
     typer.echo(f"renamed {n}")
 
 

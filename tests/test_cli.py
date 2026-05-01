@@ -489,3 +489,54 @@ def test_query_with_clip_filter_intersects(tmp_path: Path, monkeypatch: pytest.M
     # Only img1 carries the "cat" tag.
     assert len(payload) == 1
     assert payload[0]["path"].endswith("1.jpg")
+
+
+def test_rename_bulk_invalid_json_clean_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`rename-bulk` exits 1 with a clean message on malformed JSON
+    instead of dumping a traceback."""
+    db = _seed_two_images(tmp_path)
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ this is not json")
+    runner = CliRunner()
+    r = runner.invoke(app, ["rename-bulk", str(bad)])
+    assert r.exit_code == 1, r.output
+    assert "invalid JSON" in r.output
+
+
+def test_rename_bulk_missing_file_clean_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing input file → exit 1, not a Python OSError traceback."""
+    db = _seed_two_images(tmp_path)
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+    r = runner.invoke(app, ["rename-bulk", str(tmp_path / "nope.json")])
+    assert r.exit_code == 1, r.output
+    assert "cannot read" in r.output
+
+
+def test_rename_bulk_non_object_payload_clean_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A JSON list instead of an object → exit 1 with helpful message."""
+    db = _seed_two_images(tmp_path)
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    bad = tmp_path / "list.json"
+    bad.write_text("[1, 2, 3]")
+    runner = CliRunner()
+    r = runner.invoke(app, ["rename-bulk", str(bad)])
+    assert r.exit_code == 1, r.output
+    assert "JSON object" in r.output
+
+
+def test_rename_bulk_non_numeric_keys_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-numeric keys are skipped with a stderr warning, not a crash."""
+    db = _seed_two_images(tmp_path)
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    payload = tmp_path / "rename.json"
+    # `not-an-int` is bogus; `99999` is numeric but doesn't match a row.
+    # Neither should crash; both should land in the skipped list.
+    payload.write_text('{"not-an-int": "Anne", "99999": "Bea"}')
+    runner = CliRunner()
+    r = runner.invoke(app, ["rename-bulk", str(payload)])
+    assert r.exit_code == 0, r.output
+    assert "renamed 0" in r.output
+    assert "non-numeric key" in r.output
+    assert "cluster 99999 not found" in r.output

@@ -49,9 +49,18 @@ def _batched(it: Iterable[ScannedFile], n: int) -> Iterator[list[ScannedFile]]:
 
 
 def _decode_one(sf: ScannedFile) -> PreparedItem:
-    """Hash + decode a single file. Returns (sf, hash, img) or (sf, hash, None) on failure."""
-    h = hash_file(sf.path)
-    img = _open_image(sf.path)
+    """Hash + decode a single file. Returns (sf, hash, img) where either field
+    can be None on failure. Hash failure (file vanished between scan and
+    decode, permission denied, network drive flaked) used to bubble out of
+    `ex.map(_decode_one, ...)` and crash the whole producer thread; we now
+    catch OSError so the loss is bounded to one image and `failed`
+    accounting stays accurate."""
+    try:
+        h: str | None = hash_file(sf.path)
+    except OSError as e:
+        log.warning("hash_failed", path=str(sf.path), error=str(e))
+        h = None
+    img = _open_image(sf.path) if h is not None else None
     return sf, h, img
 
 
@@ -61,12 +70,22 @@ def _prefetch_decoded_batches(
     *,
     workers: int,
     queue_depth: int = 2,
+    error_box: list[BaseException] | None = None,
 ) -> Iterator[list[PreparedItem]]:
     """Decode batches in worker threads, hand them off via a bounded queue.
 
-    Why: the GPU is idle while the next batch is being read+decoded. Prefetching
-    overlaps CPU decode with GPU forward and roughly doubles throughput on this
-    hardware (980 Ti, swin_l), as observed by ~50% GPU duty cycle without it.
+    Why: the GPU is idle while the next batch is being read+decoded.
+    Prefetching overlaps CPU decode with GPU forward and roughly doubles
+    throughput on this hardware (980 Ti, swin_l), as observed by ~50% GPU
+    duty cycle without it.
+
+    `error_box`, when given, receives the producer's first exception (if
+    any) as its single element. Callers should check it after iteration
+    ends so a producer crash doesn't silently report "success" with
+    `failed=0` — the previous behaviour. We keep the error out-of-band
+    rather than raising mid-iteration so the consumer can decide how to
+    surface it (typically by bumping the `failed` counter to the
+    not-yet-processed file count and continuing to the run summary).
     """
     if not files:
         return
@@ -78,9 +97,9 @@ def _prefetch_decoded_batches(
                 for batch_files in _batched(iter(files), batch_size):
                     q.put(list(ex.map(_decode_one, batch_files)))
         except Exception as e:
-            # Without this, a decode/hash failure in the pool dies silently and
-            # the consumer reports "success" with bogus counts.
             log.error("decode_pipeline_failed", error=str(e))
+            if error_box is not None:
+                error_box.append(e)
         finally:
             q.put(_END)
 
@@ -131,7 +150,10 @@ def scan_and_tag(
     log.info("scan_filter", to_decode=len(to_decode), skipped=counts["skipped"])
 
     workers = decode_workers if decode_workers is not None else max(2, batch_size)
-    for batch in _prefetch_decoded_batches(to_decode, batch_size, workers=workers):
+    decode_error: list[BaseException] = []
+    seen_files = 0
+    for batch in _prefetch_decoded_batches(to_decode, batch_size, workers=workers, error_box=decode_error):
+        seen_files += len(batch)
         to_infer: list[tuple[int, Image.Image]] = []
         with store.transaction():
             for sf, content_hash, img in batch:
@@ -178,6 +200,18 @@ def scan_and_tag(
                 store.replace_image_tags(image_id, tagger.name, tags)
                 counts["tagged"] += 1
 
+    # If the producer crashed mid-stream, account for files we never saw
+    # in `failed` so the run summary can't report a false success. Without
+    # this the user sees `scanned=N, tagged=M, failed=0` even though the
+    # decode pipeline died and (N-M) images were never touched.
+    if decode_error:
+        unseen = max(0, len(to_decode) - seen_files)
+        counts["failed"] += unseen
+        log.error(
+            "scan_decode_pipeline_aborted",
+            unseen=unseen,
+            error=str(decode_error[0]),
+        )
     log.info("scan_completed", **counts)
     return counts
 
@@ -208,6 +242,8 @@ def embed_all(
 
     workers = decode_workers if decode_workers is not None else max(2, batch_size // 2)
     q: queue.Queue[list[tuple[int, Image.Image | None]] | object] = queue.Queue(maxsize=2)
+    decode_error: list[BaseException] = []
+    seen_rows = 0
 
     def producer() -> None:
         try:
@@ -218,6 +254,7 @@ def embed_all(
                     q.put(decoded)
         except Exception as e:
             log.error("embed_decode_failed", error=str(e))
+            decode_error.append(e)
         finally:
             q.put(_END)
 
@@ -229,6 +266,7 @@ def embed_all(
             if item is _END:
                 break
             assert isinstance(item, list)
+            seen_rows += len(item)
             loaded: list[tuple[int, Image.Image]] = []
             for image_id, img in item:
                 if img is None:
@@ -251,5 +289,17 @@ def embed_all(
         t.join(timeout=5.0)
         if t.is_alive():
             log.warning("embed_producer_did_not_exit", timeout_s=5.0)
+    # Same logic as scan_and_tag: a producer crash must surface as
+    # `failed`, not a false success. Without this `embed_completed`
+    # could report `embedded=M, failed=0` even though the decode
+    # pipeline died and (len(todo)-M) rows were never embedded.
+    if decode_error:
+        unseen = max(0, len(todo) - seen_rows)
+        counts["failed"] += unseen
+        log.error(
+            "embed_decode_pipeline_aborted",
+            unseen=unseen,
+            error=str(decode_error[0]),
+        )
     log.info("embed_completed", **counts)
     return counts
