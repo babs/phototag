@@ -67,7 +67,7 @@
       <tr><td><kbd>N</kbd></td><td>jump to next photo with an unidentified face</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>close lightbox</td></tr>
       <tr><th colspan="2" class="grp">Face popover (click a face)</th></tr>
-      <tr><td><kbd>V</kbd></td><td>validate this detection</td></tr>
+      <tr><td><kbd>V</kbd></td><td>validate (auto-advances to next un-verified named face)</td></tr>
       <tr><td><kbd>G</kbd></td><td>go to this person's photos</td></tr>
       <tr><td><kbd>W</kbd></td><td>wrong cluster — un-assign this face</td></tr>
       <tr><td><kbd>X</kbd></td><td>drop other dups of this name on this photo</td></tr>
@@ -98,6 +98,7 @@
     <input id="face-name-input" type="text" placeholder="name this person…" autocomplete="off">
     <button id="face-name-save" title="save (Enter)">save</button>
   </div>
+  <div id="face-suggestions" class="face-suggestions" style="display:none;"></div>
   <div class="row actions">
     <button id="face-view-person" title="go to this person's photos (G)" style="display:none;">go <span class="key">G</span></button>
     <button id="face-verify" title="validate this detection (V)" style="display:none;">validate <span class="key">V</span></button>

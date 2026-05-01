@@ -609,11 +609,70 @@ function openFaceNameForm(face, x, y) {
   }
   $('face-name-input').focus();
   $('face-name-input').select();
+  // Top-K identity suggestions: only meaningful for unnamed faces. The user
+  // already validated named faces; suggestions there would be noise.
+  const suggBox = $('face-suggestions');
+  suggBox.innerHTML = '';
+  suggBox.style.display = 'none';
+  if (!face.named) {
+    const reqFaceId = face.id;
+    api(`/api/faces/${face.id}/suggest?k=3`).then(items => {
+      // Bail if the popover moved on to another face while we were waiting.
+      if (!pendingFace || pendingFace.id !== reqFaceId) return;
+      if (!Array.isArray(items) || items.length === 0) return;
+      for (const it of items) {
+        const chip = document.createElement('span');
+        chip.className = 'chip';
+        chip.title = `attach to ${it.name} (${it.n_samples} samples)`;
+        const nm = document.createElement('span');
+        nm.textContent = it.name;
+        const sim = document.createElement('span');
+        sim.className = 'sim';
+        sim.textContent = '· ' + Number(it.sim).toFixed(2);
+        chip.appendChild(nm);
+        chip.appendChild(sim);
+        chip.addEventListener('click', () => attachFaceToSuggestion(it.name));
+        suggBox.appendChild(chip);
+      }
+      suggBox.style.display = 'flex';
+    }).catch(() => { /* non-fatal: suggestions are best-effort */ });
+  }
+}
+
+async function attachFaceToSuggestion(name) {
+  if (!pendingFace) return;
+  // Reuse the manual-name path: same detach-from-noise + auto-validate logic.
+  try {
+    await api(`/api/faces/${pendingFace.id}/name`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name }),
+    });
+  } catch (e) { alert('attach failed: ' + e.message); return; }
+  closeFaceNameForm();
+  showCurrentLightbox();
 }
 
 function closeFaceNameForm() {
   $('face-name-form').style.display = 'none';
+  const sugg = document.getElementById('face-suggestions');
+  if (sugg) { sugg.innerHTML = ''; sugg.style.display = 'none'; }
   pendingFace = null;
+}
+
+// Compute screen coords for a face's bbox using the current lightbox image
+// scale — same math `renderFaceOverlays` uses, hoisted so the V auto-advance
+// can re-open the popover on the next face without going through a click.
+function faceScreenAnchor(face) {
+  const img = $('lightbox-img');
+  if (!img || !img.naturalWidth || !face.bbox || face.bbox.length !== 4) {
+    return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+  }
+  const [x, y, w, h] = face.bbox;
+  const sx = img.clientWidth / img.naturalWidth;
+  const sy = img.clientHeight / img.naturalHeight;
+  const r = img.getBoundingClientRect();
+  // Anchor at the face center so the popover lands somewhere reasonable.
+  return { x: r.left + (x + w / 2) * sx, y: r.top + (y + h / 2) * sy };
 }
 
 async function saveFaceName() {
@@ -684,13 +743,28 @@ $('face-delete').onclick = async () => {
 };
 $('face-verify').onclick = async () => {
   if (!pendingFace) return;
+  const verifiedId = pendingFace.id;
   try {
     await api(`/api/faces/${pendingFace.id}/verify`, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
     });
   } catch (e) { alert('verify failed: ' + e.message); return; }
+  // Validate-and-advance: find the next named-but-not-yet-verified face on
+  // this image (skipping the one we just verified) so V can be hammered as a
+  // bulk "yes, yes, yes" through every auto-attached candidate. Falls back
+  // to plain close+refresh when the current photo has nothing left.
+  const nextFace = (state.lightboxFaces || []).find(
+    f => f.id !== verifiedId && f.named && !f.user_verified
+  );
   closeFaceNameForm();
-  showCurrentLightbox();
+  await showCurrentLightbox();
+  if (nextFace) {
+    // Re-fetch the post-refresh face object so user_verified/attach_sim are
+    // current; bbox is stable so the screen anchor math is the same.
+    const fresh = (state.lightboxFaces || []).find(f => f.id === nextFace.id) || nextFace;
+    const { x, y } = faceScreenAnchor(fresh);
+    openFaceNameForm(fresh, x, y);
+  }
 };
 $('face-drop-dups').onclick = async () => {
   if (!pendingFace || !pendingFace.label) return;

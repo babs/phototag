@@ -544,6 +544,70 @@ def test_api_token_file_empty_returns_503(
         assert c.get("/api/runs", headers={"X-API-Token": "anything"}).status_code == 503
 
 
+def test_face_suggest_ranks_known_identity(client: TestClient, seeded_db: Path) -> None:
+    """`/api/faces/{id}/suggest` returns top-K identity matches by cosine.
+
+    Seed an Anne identity centroid; insert a face whose embedding sits close
+    to that centroid; expect Anne first with sim > 0.5.
+    """
+    s = Store(seeded_db)
+    # Seed an identity centroid pointing along axis 0.
+    centroid = np.zeros(512, dtype=np.float32)
+    centroid[0] = 1.0
+    s.upsert_face_identity("Anne", centroid, n_samples=5)
+    # Decoy identity in an orthogonal direction so Anne should clearly win.
+    other = np.zeros(512, dtype=np.float32)
+    other[1] = 1.0
+    s.upsert_face_identity("Bob", other, n_samples=3)
+
+    img_id = _image_id(s, "/tmp/b.jpg")
+    # Embedding mostly along axis 0 with a tiny perturbation → cosine close to 1
+    # vs Anne, near 0 vs Bob.
+    emb = np.zeros(512, dtype=np.float32)
+    emb[0] = 0.95
+    emb[2] = 0.31  # keep some noise so sim isn't exactly 1.0
+    new_face = s.insert_face(
+        image_id=img_id,
+        bbox=[2, 2, 20, 20],
+        det_score=0.9,
+        embedding=emb,
+        model_name="m",
+    )
+    s.close()
+
+    r = client.get(f"/api/faces/{new_face}/suggest?k=3")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body, "expected non-empty suggestions"
+    assert body[0]["name"] == "Anne"
+    assert body[0]["sim"] > 0.5
+    assert body[0]["n_samples"] == 5
+    # Sorted desc by sim.
+    sims = [s["sim"] for s in body]
+    assert sims == sorted(sims, reverse=True)
+
+
+def test_face_suggest_unknown_face_returns_404(client: TestClient) -> None:
+    r = client.get("/api/faces/999999/suggest")
+    assert r.status_code == 404
+
+
+def test_face_suggest_no_identities_returns_empty(client: TestClient, seeded_db: Path) -> None:
+    s = Store(seeded_db)
+    img_id = _image_id(s, "/tmp/a.jpg")
+    fid = s.insert_face(
+        image_id=img_id,
+        bbox=[3, 3, 10, 10],
+        det_score=0.9,
+        embedding=np.ones(512, dtype=np.float32),
+        model_name="m",
+    )
+    s.close()
+    r = client.get(f"/api/faces/{fid}/suggest")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
 def test_corrections_logged_on_manual_name(client: TestClient, seeded_db: Path) -> None:
     s = Store(seeded_db)
     img_id = _image_id(s, "/tmp/b.jpg")

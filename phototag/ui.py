@@ -1045,6 +1045,51 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         )
         return {"ok": True, "face_id": face_id, "cluster_id": cid, "name": name}
 
+    @app.get("/api/faces/{face_id}/suggest")
+    def api_face_suggest(
+        face_id: int,
+        k: Annotated[int, Query(ge=1, le=20)] = 3,
+    ) -> list[dict[str, Any]]:
+        """Top-K identity suggestions for a face by cosine vs face_identities.
+
+        Returns `[{name, sim, n_samples}, ...]` sorted by sim desc. No
+        threshold filter — caller decides what to surface. Empty list when
+        no identities exist or none share the embedding's `dim`.
+        """
+        from .faces import _identity_matrix, _normalize_rows
+
+        s = _store(app)
+        face = s.get_face(face_id)
+        if face is None:
+            raise HTTPException(status_code=404, detail="face not found")
+        emb_row = s.conn.execute(
+            "SELECT dim, embedding FROM faces WHERE id=?",
+            (face_id,),
+        ).fetchone()
+        if emb_row is None or emb_row["embedding"] is None:
+            return []
+        dim = int(emb_row["dim"])
+        emb = np.frombuffer(emb_row["embedding"], dtype=np.float32, count=dim)
+        identities = s.list_face_identities()
+        if not identities:
+            return []
+        same_dim, M = _identity_matrix(identities, dim)
+        if M.shape[0] == 0:
+            return []
+        # Vectorized cosine: normalize both sides, single matvec.
+        v = emb / (np.linalg.norm(emb) or 1.0)
+        Mn = _normalize_rows(M)
+        sims = Mn @ v  # (N_idents,)
+        order = np.argsort(-sims)[:k]
+        return [
+            {
+                "name": str(same_dim[int(j)]["name"]),
+                "sim": float(sims[int(j)]),
+                "n_samples": int(same_dim[int(j)].get("n_samples", 0)) or 0,
+            }
+            for j in order
+        ]
+
     @app.get("/api/faces/corrections")
     def api_face_corrections(
         action: str | None = None,
