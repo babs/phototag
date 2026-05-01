@@ -57,6 +57,11 @@ class FaceNameRequest(BaseModel):
     name: str | None
 
 
+class FaceIdentityMergeRequest(BaseModel):
+    survivor: str
+    loser: str
+
+
 def _store(app: FastAPI) -> Store:
     s = getattr(app.state, "store", None)
     if s is None:
@@ -784,6 +789,37 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             s.delete_face_identity(name)
         log.info("face_identity_split", name=name, into=new_names)
         return {"split": len(clusters), "from": name, "into": new_names}
+
+    @app.post("/api/face-identities/merge")
+    def api_face_identities_merge(body: FaceIdentityMergeRequest) -> dict[str, Any]:
+        """Merge two `face_identities` rows representing the same person.
+
+        Sample-weighted centroid blend (cap=200, mirrors
+        `phototag.faces.IDENTITY_SAMPLE_CAP`), summed display `n_samples`,
+        re-label every cluster of `loser` to `survivor`, drop the loser row.
+        """
+        survivor = (body.survivor or "").strip()
+        loser = (body.loser or "").strip()
+        if not survivor or not loser:
+            raise HTTPException(status_code=400, detail="survivor and loser required")
+        if survivor == loser:
+            raise HTTPException(status_code=400, detail="survivor and loser must differ")
+        s = _store(app)
+        names = {i["name"] for i in s.list_face_identities()}
+        if survivor not in names:
+            raise HTTPException(status_code=404, detail=f"survivor identity not found: {survivor}")
+        if loser not in names:
+            raise HTTPException(status_code=404, detail=f"loser identity not found: {loser}")
+        with s.transaction():
+            result = s.merge_face_identities(survivor, loser)
+        log.info(
+            "face_identity_merge",
+            survivor=survivor,
+            loser=loser,
+            renamed_clusters=result["renamed_clusters"],
+            n_samples=result["n_samples"],
+        )
+        return result
 
     @app.get("/api/images/{image_id}")
     def api_image(image_id: int) -> dict[str, Any]:

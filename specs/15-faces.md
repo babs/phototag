@@ -153,6 +153,12 @@ GET    /api/people/by-name/{name}/clusters        → just the cluster rows
 POST   /api/people/by-name/{name}/rename          → rename every cluster of name
                                                     (noise cluster is skipped)
 POST   /api/people/by-name/{name}/split           → suffix into "name 1", "name 2", …
+POST   /api/face-identities/merge                 → body {survivor, loser}: blend
+                                                    centroids by sample count
+                                                    (cap=200), sum n_samples,
+                                                    re-label every cluster of
+                                                    loser → survivor, drop the
+                                                    loser identity row.
 
 GET    /api/people/{cluster_id}                   → cluster detail + members
 POST   /api/people/{cluster_id}/name              → set/clear label_user
