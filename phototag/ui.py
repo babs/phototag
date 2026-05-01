@@ -116,14 +116,20 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 s.close()
 
     app = FastAPI(title="phototag UI", lifespan=lifespan)
-    # Restrict CORS: this UI is local-only by design (default bind 127.0.0.1).
-    # Allowing `*` plus DELETE/POST mutations would let any browser tab hit the
-    # API when the user runs --host 0.0.0.0 (see /serve in cli.py).
+    # The UI is same-origin (the page and the API are served by the same
+    # uvicorn process), so the browser doesn't trigger CORS preflight at all
+    # for normal use. The allow-list below only matters if a different
+    # localhost-port tool ever calls the API cross-origin. Default ports for
+    # the typical dev/prod patterns are listed; other ports require the user
+    # to extend this list (or proxy through nginx). Allowing `*` would be a
+    # real risk under --host 0.0.0.0 since any LAN tab could hit DELETE/POST.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
             "http://127.0.0.1:8000",
             "http://localhost:8000",
+            "http://127.0.0.1:8090",
+            "http://localhost:8090",
         ],
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type"],

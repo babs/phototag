@@ -60,12 +60,20 @@ phototag category map --cluster N --category C
 phototag category list
 phototag category apply
 
-phototag faces detect [--gpu] [--limit N] [--i-understand]
+phototag faces detect [--limit N] [--force] [--i-understand]
 phototag faces cluster [--min-size 3] [--min-samples 2]
+phototag faces verify [--min-score 0.65] [--min-area 1024] [--apply]
+phototag faces refine-noise [--min-size 3] [--min-samples 2] [--persist]
 phototag faces name CLUSTER_ID NAME
 phototag faces unname CLUSTER_ID
-phototag faces purge [--keep-identities]
+phototag faces clear-noise-labels
+phototag faces purge [--keep-identities] [--yes]
+phototag faces stats
 phototag faces report [--out report-faces/]
+
+phototag exif-backfill [--limit N] [--force]
+phototag geo-tag       [--limit N] [--force]
+phototag serve         [--host 127.0.0.1] [--port 8000]
 ```
 
 Faces are **opt-in** and biometric — see [`15-faces.md`](15-faces.md).
