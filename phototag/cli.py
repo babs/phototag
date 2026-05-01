@@ -390,22 +390,39 @@ def query(
     ] = None,
     min_score: Annotated[
         float,
-        typer.Option("--min-score", help="minimum tag score for the --tag filter"),
+        typer.Option(
+            "--min-score",
+            help=(
+                "minimum tag score for the --tag filter (ignored when --tag isn't set;"
+                " CLIP scores aren't calibrated so it doesn't apply to the embedding ranking)"
+            ),
+        ),
     ] = 0.0,
     run_id: Annotated[
         int | None,
-        typer.Option("--run-id", help="restrict cluster-side filters to this cluster_run id"),
+        typer.Option(
+            "--run-id",
+            help=(
+                "face_run id to scope the --person filter "
+                "(useful when the same identity exists across multiple "
+                "`phototag faces cluster` runs and you only want one); "
+                "ignored when --person isn't set"
+            ),
+        ),
     ] = None,
 ) -> None:
     """Semantic search by text against cached CLIP embeddings, optionally
-    intersected with tag / person / cluster filters (#28 — parity with
-    `/api/search`).
+    intersected with tag / person filters (#28 — parity with `/api/search`).
 
-    Filter semantics mirror the UI's `/api/search`: `--tag` is repeatable
-    and AND-combined; `--person` is repeatable and AND-combined; both
-    intersect with the semantic top-K. `--min-score` gates the tag filter
-    only (it has no meaning for the embedding ranking — CLIP scores
-    aren't calibrated).
+    Filter semantics mirror the UI's `/api/search` for the tag and person
+    sides: `--tag` is repeatable and AND-combined; `--person` is repeatable
+    and AND-combined; both intersect with the semantic top-K. `--min-score`
+    gates the tag filter only (CLIP scores aren't calibrated, so applying
+    it to the embedding ranking is meaningless).
+
+    `--run-id` is a CLI-only extension over `/api/search` — it scopes the
+    `--person` filter to one face_run (different ID namespace from the
+    image-side `cluster_runs` table the UI's run_id URL param uses).
 
     Note: the first call boots the CLIP text encoder (~2-3 s on CPU). Long
     queries are truncated by the CLIP tokenizer at 77 tokens; a one-line
@@ -449,24 +466,11 @@ def query(
             }
             allowed = tag_ids if allowed is None else (allowed & tag_ids)
         if person:
-            person_ids = store.search_images_by_persons(person)
-            # Optionally restrict to a specific cluster run; silently no-op
-            # if the run id doesn't exist (mirrors api_search behavior).
-            if run_id is not None:
-                # search_images_by_persons doesn't accept run_id today;
-                # filter post-hoc via the assignments table to stay
-                # consistent. Cheap because the resulting set is small.
-                in_run = {
-                    int(r["image_id"])
-                    for r in store.conn.execute(
-                        "SELECT DISTINCT f.image_id FROM faces f "
-                        "JOIN face_cluster_assignments fca ON fca.face_id = f.id "
-                        "JOIN face_clusters fc ON fc.id = fca.cluster_id "
-                        "WHERE fc.run_id = ?",
-                        (int(run_id),),
-                    )
-                }
-                person_ids = person_ids & in_run
+            # `run_id` is pushed into the same SQL pass — see
+            # `Store.search_images_by_persons`. Avoids an extra full
+            # face_cluster_assignments scan that the post-hoc intersection
+            # would have cost on a large library.
+            person_ids = store.search_images_by_persons(person, run_id=run_id)
             allowed = person_ids if allowed is None else (allowed & person_ids)
         if allowed is not None and not allowed:
             typer.echo("[]")

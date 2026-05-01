@@ -125,6 +125,41 @@ def test_search_by_persons(tmp_db: Path) -> None:
         store.close()
 
 
+def test_search_by_persons_run_id_filter(tmp_db: Path) -> None:
+    """`run_id` keyword filters the cluster set to one face_run (#28).
+    A face named "Anne" in run A but not in run B must be invisible to a
+    `--run-id=B` query."""
+    store = Store(tmp_db)
+    try:
+        img1 = _add_image(store, path="/tmp/1.jpg", hash_="h1")
+        img2 = _add_image(store, path="/tmp/2.jpg", hash_="h2")
+
+        run_a = store.create_face_run({"manual": True}, _now())
+        anne_a = store.add_face_cluster(
+            run_id=run_a, cluster_no=0, size=1, label_user="Anne", label_auto=None
+        )
+        f1 = _add_face(store, img1)
+        store.assign_face_to_cluster(f1, anne_a, 0.0)
+
+        run_b = store.create_face_run({"manual": True}, _now())
+        anne_b = store.add_face_cluster(
+            run_id=run_b, cluster_no=0, size=1, label_user="Anne", label_auto=None
+        )
+        f2 = _add_face(store, img2)
+        store.assign_face_to_cluster(f2, anne_b, 0.0)
+
+        # Without filter: both images surface (Anne exists in both runs).
+        assert store.search_images_by_persons(["Anne"]) == {img1, img2}
+        # Filtered to run_a: only img1.
+        assert store.search_images_by_persons(["Anne"], run_id=run_a) == {img1}
+        # Filtered to run_b: only img2.
+        assert store.search_images_by_persons(["Anne"], run_id=run_b) == {img2}
+        # Filtered to a non-existent run: empty.
+        assert store.search_images_by_persons(["Anne"], run_id=99999) == set()
+    finally:
+        store.close()
+
+
 def test_rename_clusters_by_label(tmp_db: Path) -> None:
     store = Store(tmp_db)
     try:

@@ -1468,20 +1468,29 @@ class Store:
             )
         return len(cids)
 
-    def search_images_by_persons(self, names: list[str]) -> set[int]:
-        """Image ids containing a face in a cluster named for each of `names` (AND)."""
+    def search_images_by_persons(self, names: list[str], *, run_id: int | None = None) -> set[int]:
+        """Image ids containing a face in a cluster named for each of `names`
+        (AND-combined). When `run_id` is given, restricts to clusters from
+        that face_run — useful for time-sliced queries (e.g. the `phototag
+        query --run-id N` filter, #28). Pushed into SQL so we don't scan the
+        whole assignments table just to intersect post-hoc."""
         if not names:
             return set()
         placeholders = ",".join("?" * len(names))
+        params: list[Any] = list(names)
+        run_clause = ""
+        if run_id is not None:
+            run_clause = "AND fc.run_id = ?"
+            params.append(int(run_id))
         cur = self.conn.execute(
             f"""
             SELECT f.image_id, fc.label_user
             FROM faces f
             JOIN face_cluster_assignments fca ON fca.face_id = f.id
             JOIN face_clusters fc ON fc.id = fca.cluster_id
-            WHERE fc.label_user IN ({placeholders})
+            WHERE fc.label_user IN ({placeholders}) {run_clause}
             """,
-            names,
+            params,
         )
         by_name: dict[str, set[int]] = {n: set() for n in names}
         for row in cur:
