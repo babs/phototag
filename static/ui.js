@@ -198,31 +198,43 @@ async function showCurrentLightbox() {
   scheduleFaceOverlayRender(myToken);
 }
 
+// Render face boxes through every async trigger we can: ResizeObserver
+// (covers layout-after-load), img.decode() (cached images), and a RAF
+// fallback (consecutive same-size images where the observer never fires).
+// All paths read state.lightboxFaces / state.lightboxImage so they paint
+// the current image, not a stale one. The observer is attached ONCE and
+// reads `lightboxToken` (the live module var) directly, never a closed-over
+// stale one — that was the bug where overlays disappeared after a few nav
+// steps even though both images had detected faces.
+let _faceObserver = null;
+
+function _renderIfReady() {
+  const img = $('lightbox-img');
+  if (img.naturalWidth > 0 && img.clientWidth > 0) renderFaceOverlays();
+}
+
 function scheduleFaceOverlayRender(token) {
   const img = $('lightbox-img');
+  if (!_faceObserver) {
+    _faceObserver = new ResizeObserver(_renderIfReady);
+    _faceObserver.observe(img);
+  }
   const tryRender = () => {
     if (token !== lightboxToken) return;  // navigation moved on
-    if (img.naturalWidth > 0 && img.clientWidth > 0) {
-      renderFaceOverlays();
-    } else {
-      // One more frame; covers the moment between src= and layout.
-      requestAnimationFrame(() => {
-        if (token !== lightboxToken) return;
-        renderFaceOverlays();
-      });
-    }
+    _renderIfReady();
   };
-  if (img.complete && img.naturalWidth > 0) {
-    tryRender();
-    return;
-  }
-  // Prefer .decode() over the load event — it resolves for cached images too.
+  // Direct attempt for the fast path (image already decoded and laid out).
+  tryRender();
+  // Cached/freshly-set images: decode resolves even when `load` won't fire.
   if (img.decode) {
     img.decode().then(tryRender, tryRender);
   } else {
     img.addEventListener('load', tryRender, { once: true });
     img.addEventListener('error', tryRender, { once: true });
   }
+  // Same-size consecutive images: ResizeObserver never fires; this RAF
+  // triggers a render once layout settles for the new src.
+  requestAnimationFrame(tryRender);
 }
 
 function formatExif(exif) {

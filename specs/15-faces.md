@@ -113,12 +113,67 @@ Or, in the UI, type a name in the cluster page. Sets `face_clusters.label_user` 
 ## API additions
 
 ```
-GET  /api/people                          → [{id, name, sample_face_ids[3], n_photos}]
-GET  /api/people/{cluster_id}             → cluster + member faces (image_id, bbox)
-POST /api/people/{cluster_id}/name        → {"name": "Anne"} → label_user
-GET  /api/images/{id}/faces               → faces in this image, with cluster + name
-GET  /face-thumb/{face_id}                → server-cropped + aligned face JPEG
+GET    /api/people [?only_named=|only_unnamed=]   → cluster-level rows
+GET    /api/people/names                          → name-level rows (deduped)
+GET    /api/people/by-name/{name}                 → merged person view (every
+                                                    cluster sharing the name +
+                                                    aggregate counts)
+GET    /api/people/by-name/{name}/clusters        → just the cluster rows
+POST   /api/people/by-name/{name}/rename          → rename every cluster of name
+POST   /api/people/by-name/{name}/split           → suffix into "name 1", "name 2", …
+
+GET    /api/people/{cluster_id}                   → cluster detail + members
+POST   /api/people/{cluster_id}/name              → set/clear label_user
+POST   /api/faces/{face_id}/name                  → manual cluster, when no
+                                                    `phototag faces cluster` run
+
+GET    /api/images/{id}/faces                     → faces on this image
+DELETE /api/images/{id}/faces                     → drop all faces (e.g. crowd)
+POST   /api/images/{id}/redetect-faces            → re-run RetinaFace+ArcFace
+
+DELETE /api/faces/{id}                            → false-positive removal
+POST   /api/faces/{id}/unassign                   → "wrong cluster" — drops the
+                                                    face's cluster row (face
+                                                    stays for re-clustering)
+GET    /api/faces/corrections                     → audit log: named / unassigned
+                                                    / deleted entries
+
+GET    /face-thumb/{face_id}                      → cropped face JPEG (cached)
 ```
+
+### Corrections audit (`face_corrections`)
+
+Every user action is logged to `face_corrections(face_id, image_id, action,
+cluster_id, name, created_at)`. The next `phototag faces cluster` pass can
+read it to seed soft constraints:
+
+| logged action | proposed constraint at re-cluster |
+|---|---|
+| `named` (face X assigned to "Anne") | must-link X with Anne's identity centroid |
+| `unassigned` (face X removed from cluster Y) | cannot-link X with the centroid that becomes Y's successor |
+| `deleted` | not used (row is gone) |
+
+Constraints aren't applied yet — the log is currently informational. Future
+work plan, in order of cost:
+
+1. **Sticky-label post-pass** (cheap; ~1 day). After `cluster_faces` produces
+   new clusters, walk `face_corrections` and apply:
+   - `named`: force `face_clusters.label_user = name` for any cluster
+     containing this face; update the identity centroid with this face.
+   - `unassigned`: if this face landed in a cluster whose identity matches
+     the old (wrong) cluster's identity, reassign to noise (`cluster_no = -1`).
+   This means user actions persist across re-clustering with no algorithm
+   change. Lossy on edge cases but predictable.
+2. **Identity-bias scoring** (medium). When matching a new cluster to the
+   identity table, weight identities the user has confirmed via `named`
+   higher; weight identities the user has rejected via `unassigned` lower.
+3. **Constrained HDBSCAN** (heavy). Use a semi-supervised clusterer (e.g.
+   `constrained-clustering`) where `named` faces become must-links and
+   `unassigned` pairs become cannot-links. Best quality, more work, more
+   dependencies.
+
+The current corrections table is the substrate for any of these — actions
+already logged today are usable by the future pass.
 
 ## UI
 
@@ -126,18 +181,20 @@ GET  /face-thumb/{face_id}                → server-cropped + aligned face JPEG
 
 A new sidebar tab next to "clusters" called **people** lists face clusters by size (or alphabetically when named). Click → person page: face-crop thumbnails on top, full photos containing that person below.
 
-### Lightbox face overlay (this turn's idea)
+### Lightbox face overlay
 
 When a single image is open in the lightbox:
 - Fetch `/api/images/{id}/faces`.
-- For each face, render an absolutely-positioned `<div>` overlay matching the bbox, scaled to the displayed image size. Listen on `img.onload` and recompute on resize.
-- Style: 2 px border in a stable per-cluster colour (hash cluster_id → hue), name floating below the box.
-- Click an overlay → either:
-  - if cluster has `label_user`: load `/api/people/{cluster_id}` (jump to that person)
-  - else: open a tiny inline form to name the cluster ("name this person…")
-- Toggle overlay visibility with **F** key or a button in the lightbox toolbar; default on.
-
-This makes naming a face a one-click flow: see a face → click → type name → it propagates to every other photo of that person, immediately.
+- For each face, render an absolutely-positioned `<div>` overlay matching the bbox, scaled to the displayed image size.
+- Reliability: layout/load races mean `clientWidth` can be 0 or `load` may not fire on cached images. The render is driven by a single `ResizeObserver` on the `<img>` plus a `decode()` race; whichever resolves first triggers the render, both gated by `lightboxToken` to drop stale paints during navigation.
+- Style: 2 px border in a stable per-cluster colour (hash cluster_id → hue), name floating below the box. **Suspect** detections (verified=0 or det_score < 0.65) get a dashed red border instead.
+- Clicking any face opens a small popover:
+  - **save**: name the cluster (or the face directly via `/api/faces/{id}/name` when no cluster run exists); refreshes the overlay.
+  - **view 👤 *Name***: jump the lightbox to the merged person view for that name.
+  - **wrong**: drop the face's cluster assignment (logs a `face_corrections` row with the old `cluster_id`).
+  - **delete**: drop the face row (logs a `deleted` correction).
+- Lightbox info bar shows aggregate actions: **drop N faces** (one click for crowd shots) and **re-detect faces** (re-runs RetinaFace+ArcFace on this image only).
+- Toggle overlay visibility with **F** key or the toolbar button; default on.
 
 ### Visual
 

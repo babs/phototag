@@ -306,9 +306,11 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     def api_delete_face(face_id: int) -> dict[str, Any]:
         """Drop a false-positive face row."""
         s = _store(app)
-        if s.get_face(face_id) is None:
+        face = s.get_face(face_id)
+        if face is None:
             raise HTTPException(status_code=404, detail="face not found")
         with s.transaction():
+            s.log_face_correction(face_id=face_id, image_id=int(face["image_id"]), action="deleted")
             s.delete_face(face_id)
         log.info("face_deleted", face_id=face_id)
         return {"deleted": face_id}
@@ -318,29 +320,49 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         """Remove this face's cluster assignment in the latest run.
 
         Use case: face was clustered to the wrong person. The face row stays
-        so the next `phototag faces cluster` can re-place it.
+        so the next `phototag faces cluster` can re-place it. We log the
+        old cluster_id in face_corrections so future passes can use it as a
+        cannot-link constraint.
         """
         s = _store(app)
-        if s.get_face(face_id) is None:
+        face = s.get_face(face_id)
+        if face is None:
             raise HTTPException(status_code=404, detail="face not found")
         latest = s.latest_face_run()
         with s.transaction():
+            # Capture the old cluster ids before deleting so we can record them.
+            scoped_clusters: list[int] = []
             if latest is None:
-                # No runs scoped — drop every assignment for this face.
                 rows = s.conn.execute(
                     "SELECT cluster_id FROM face_cluster_assignments WHERE face_id=?",
                     (face_id,),
                 ).fetchall()
-                cids = [int(r["cluster_id"]) for r in rows]
+                scoped_clusters = [int(r["cluster_id"]) for r in rows]
                 s.conn.execute("DELETE FROM face_cluster_assignments WHERE face_id=?", (face_id,))
-                for cid in cids:
+                for cid in scoped_clusters:
                     s.conn.execute(
                         "UPDATE face_clusters SET size = MAX(0, size - 1) WHERE id=?",
                         (cid,),
                     )
-                removed = len(cids)
+                removed = len(scoped_clusters)
             else:
+                rows = s.conn.execute(
+                    """
+                    SELECT fc.id AS cid FROM face_cluster_assignments fca
+                    JOIN face_clusters fc ON fc.id = fca.cluster_id
+                    WHERE fca.face_id=? AND fc.run_id=?
+                    """,
+                    (face_id, latest),
+                ).fetchall()
+                scoped_clusters = [int(r["cid"]) for r in rows]
                 removed = s.unassign_face_from_run(face_id, latest)
+            for cid in scoped_clusters:
+                s.log_face_correction(
+                    face_id=face_id,
+                    image_id=int(face["image_id"]),
+                    action="unassigned",
+                    cluster_id=cid,
+                )
         log.info("face_unassigned", face_id=face_id, removed=removed)
         return {"unassigned": face_id, "removed": removed}
 
@@ -438,16 +460,11 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="image not found")
         out = []
         seen: set[int] = set()
-        # An image can have rows from multiple cluster runs; latest run wins.
-        latest = s.latest_face_run()
+        # `list_faces_for_image` already picks the most-recent-per-face run
+        # via a window function, so each face appears once.
         for f in s.list_faces_for_image(image_id):
             if f["id"] in seen:
                 continue
-            # Prefer the row that matches the latest run (if any).
-            if latest is not None and f["cluster_id"] is not None:
-                cluster = s.get_face_cluster(int(f["cluster_id"]))
-                if cluster and cluster["run_id"] != latest:
-                    continue
             seen.add(f["id"])
             out.append(
                 {
@@ -624,9 +641,26 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 s.upsert_face_identity(name, blended.astype(np.float32, copy=False), n_samples=n0 + 1)
             else:
                 s.upsert_face_identity(name, emb, n_samples=1)
+            s.log_face_correction(
+                face_id=face_id,
+                image_id=int(face["image_id"]),
+                action="named",
+                cluster_id=cid,
+                name=name,
+            )
 
         log.info("face_named_manual", face_id=face_id, cluster_id=cid, name=name)
         return {"ok": True, "face_id": face_id, "cluster_id": cid, "name": name}
+
+    @app.get("/api/faces/corrections")
+    def api_face_corrections(
+        action: str | None = None,
+        face_id: int | None = None,
+        limit: Annotated[int, Query(ge=1, le=2000)] = 200,
+    ) -> list[dict[str, Any]]:
+        """Audit log of user-driven corrections (named / unassigned / deleted)."""
+        rows = _store(app).list_face_corrections(face_id=face_id, action=action)
+        return rows[:limit]
 
     @app.get("/face-thumb/{face_id}")
     def face_thumb(face_id: int) -> FileResponse:

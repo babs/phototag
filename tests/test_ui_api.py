@@ -210,3 +210,83 @@ def test_drop_all_image_faces(client: TestClient, seeded_db: Path) -> None:
     r = client.delete(f"/api/images/{img_id}/faces")
     assert r.status_code == 200
     assert r.json()["deleted"] >= 1
+
+
+def test_by_name_merged_view(client: TestClient, seeded_db: Path) -> None:
+    """`/api/people/by-name/{name}` walks every cluster sharing the label."""
+    s = Store(seeded_db)
+    # Add a second Anne cluster on img2 so the merged view aggregates two.
+    run = s.latest_face_run()
+    assert run is not None
+    img_id = _image_id(s, "/tmp/b.jpg")
+    cid2 = s.add_face_cluster(run_id=run, cluster_no=42, size=1, label_auto=None, label_user="Anne")
+    f2 = s.insert_face(
+        image_id=img_id,
+        bbox=[0, 0, 30, 30],
+        det_score=0.9,
+        embedding=np.array([0.7] * 512, dtype=np.float32),
+        model_name="m",
+    )
+    s.assign_face_to_cluster(f2, cid2, 0.0)
+    s.close()
+    r = client.get("/api/people/by-name/Anne")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "Anne"
+    assert body["n_clusters"] == 2
+    assert body["n_photos"] == 2
+    assert len(body["groups"]) == 2
+
+
+def test_only_unnamed_filter(client: TestClient, seeded_db: Path) -> None:
+    """`/api/people?only_unnamed=true` returns only clusters lacking label_user."""
+    s = Store(seeded_db)
+    run = s.latest_face_run()
+    assert run is not None
+    s.add_face_cluster(run_id=run, cluster_no=99, size=0, label_auto="person 99", label_user=None)
+    s.close()
+    r = client.get("/api/people?only_unnamed=true")
+    assert r.status_code == 200
+    rows = r.json()
+    assert all(p["name"] is None for p in rows)
+
+
+def test_corrections_logged_on_unassign(client: TestClient, seeded_db: Path) -> None:
+    """Wrong-cluster action records a face_corrections row."""
+    s = Store(seeded_db)
+    img_id = _image_id(s, "/tmp/a.jpg")
+    face = s.list_faces_for_image(img_id)[0]["id"]
+    old_cluster = s.list_faces_for_image(img_id)[0]["cluster_id"]
+    s.close()
+    r = client.post(f"/api/faces/{face}/unassign", json={})
+    assert r.status_code == 200
+    audit = client.get("/api/faces/corrections?action=unassigned").json()
+    assert any(c["face_id"] == face and c["cluster_id"] == old_cluster for c in audit)
+
+
+def test_corrections_logged_on_delete(client: TestClient, seeded_db: Path) -> None:
+    s = Store(seeded_db)
+    img_id = _image_id(s, "/tmp/a.jpg")
+    face = s.list_faces_for_image(img_id)[0]["id"]
+    s.close()
+    r = client.delete(f"/api/faces/{face}")
+    assert r.status_code == 200
+    audit = client.get("/api/faces/corrections?action=deleted").json()
+    assert any(c["face_id"] == face for c in audit)
+
+
+def test_corrections_logged_on_manual_name(client: TestClient, seeded_db: Path) -> None:
+    s = Store(seeded_db)
+    img_id = _image_id(s, "/tmp/b.jpg")
+    new_face = s.insert_face(
+        image_id=img_id,
+        bbox=[5, 5, 25, 25],
+        det_score=0.9,
+        embedding=np.array([0.3] * 512, dtype=np.float32),
+        model_name="m",
+    )
+    s.close()
+    r = client.post(f"/api/faces/{new_face}/name", json={"name": "Carla"})
+    assert r.status_code == 200
+    audit = client.get("/api/faces/corrections?action=named").json()
+    assert any(c["face_id"] == new_face and c["name"] == "Carla" for c in audit)

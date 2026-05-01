@@ -120,6 +120,24 @@ MIGRATIONS: list[str] = [
     -- NULL = not checked yet; 1 = passed; 0 = failed.
     ALTER TABLE faces ADD COLUMN verified INTEGER;
     """,
+    """
+    -- v6: log every user-driven correction on a face (named, unassigned,
+    -- deleted) so a future `phototag faces cluster` pass can use them as
+    -- soft constraints (must-link for `named`, cannot-link for `unassigned`).
+    -- No FK on face_id/image_id on purpose — the audit trail must survive
+    -- deletion of the row it describes.
+    CREATE TABLE IF NOT EXISTS face_corrections (
+        id          INTEGER PRIMARY KEY,
+        face_id     INTEGER,
+        image_id    INTEGER,
+        action      TEXT NOT NULL,      -- 'named' | 'unassigned' | 'deleted'
+        cluster_id  INTEGER,            -- old cluster on 'unassigned'/'named'
+        name        TEXT,               -- new label on 'named'
+        created_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_face_corrections_face ON face_corrections(face_id);
+    CREATE INDEX IF NOT EXISTS idx_face_corrections_action ON face_corrections(action);
+    """,
 ]
 
 
@@ -571,13 +589,31 @@ class Store:
         return ids, np.vstack(vectors)
 
     def list_faces_for_image(self, image_id: int) -> list[dict[str, Any]]:
+        # For faces that exist in multiple face_runs (auto + manual), pick the
+        # row from the *most recent run that has an assignment for this face*.
+        # Picking globally-latest-run can hide a face that's in an older
+        # run but not in a newer one (the common case after a manual run is
+        # created on top of an auto-cluster).
         cur = self.conn.execute(
             """
+            WITH ranked AS (
+                SELECT
+                    fca.face_id,
+                    fc.id   AS cluster_id,
+                    fc.cluster_no,
+                    fc.label_user,
+                    fc.label_auto,
+                    fc.run_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY fca.face_id ORDER BY fc.run_id DESC
+                    ) AS rn
+                FROM face_cluster_assignments fca
+                JOIN face_clusters fc ON fc.id = fca.cluster_id
+            )
             SELECT f.id, f.bbox_json, f.det_score, f.verified,
-                   fc.id AS cluster_id, fc.cluster_no, fc.label_user, fc.label_auto
+                   r.cluster_id, r.cluster_no, r.label_user, r.label_auto
             FROM faces f
-            LEFT JOIN face_cluster_assignments fca ON fca.face_id = f.id
-            LEFT JOIN face_clusters fc ON fc.id = fca.cluster_id
+            LEFT JOIN ranked r ON r.face_id = f.id AND r.rn = 1
             WHERE f.image_id = ?
             """,
             (image_id,),
@@ -760,6 +796,52 @@ class Store:
                 (r["cluster_id"],),
             )
         self.conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
+
+    def log_face_correction(
+        self,
+        *,
+        face_id: int | None,
+        image_id: int | None,
+        action: str,
+        cluster_id: int | None = None,
+        name: str | None = None,
+    ) -> int:
+        """Append a row to face_corrections; cheap audit trail of user edits."""
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        cur = self.conn.execute(
+            """
+            INSERT INTO face_corrections(face_id,image_id,action,cluster_id,name,created_at)
+            VALUES(?,?,?,?,?,?) RETURNING id
+            """,
+            (
+                face_id,
+                image_id,
+                action,
+                cluster_id,
+                name,
+                _dt.now(UTC).isoformat(timespec="seconds"),
+            ),
+        )
+        return int(cur.fetchone()["id"])
+
+    def list_face_corrections(
+        self, *, face_id: int | None = None, action: str | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT id, face_id, image_id, action, cluster_id, name, created_at FROM face_corrections"
+        params: list[Any] = []
+        clauses: list[str] = []
+        if face_id is not None:
+            clauses.append("face_id=?")
+            params.append(face_id)
+        if action is not None:
+            clauses.append("action=?")
+            params.append(action)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC"
+        return [dict(r) for r in self.conn.execute(sql, params)]
 
     def set_face_verified(self, face_id: int, value: int | None) -> None:
         self.conn.execute("UPDATE faces SET verified=? WHERE id=?", (value, face_id))
