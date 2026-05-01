@@ -143,14 +143,23 @@
     color: var(--muted); background: #f6f6f6; letter-spacing: 0.5px;
   }
   .filters .person { background: #fde6c4; color: #92400e; }
-  /* image lightbox */
+  /* image lightbox — flex-column so image and info bar stack without
+     overlap. Content starts near the top so the small space above the
+     image just covers the absolutely-positioned X/Y counter and the
+     "faces (F)" toggle. */
   .lightbox {
     position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none;
-    align-items: center; justify-content: center; z-index: 100; padding: 20px;
+    flex-direction: column; align-items: center; justify-content: flex-start;
+    z-index: 100; padding: 56px 20px 16px 20px; gap: 8px;
   }
   .lightbox.show { display: flex; }
-  .lightbox img { max-width: 95vw; max-height: 80vh; }
-  .lightbox .info { position: absolute; left: 20px; right: 20px; bottom: 20px; color: #fff; font-size: 12px; max-height: 30vh; overflow-y: auto; background: rgba(0,0,0,0.5); padding: 8px; border-radius: 4px; }
+  .lightbox img { max-width: 95vw; max-height: 72vh; display: block; }
+  .lightbox #lightbox-stage { position: relative; max-width: 95vw; max-height: 72vh; }
+  .lightbox .info {
+    color: #fff; font-size: 12px; background: rgba(0,0,0,0.55);
+    padding: 8px 10px; border-radius: 4px;
+    max-width: 95vw; max-height: 22vh; overflow-y: auto; flex-shrink: 0;
+  }
   .lightbox .close { position: absolute; top: 12px; right: 16px; color: #fff; font-size: 28px; cursor: pointer; user-select: none; }
   .lightbox .nav {
     position: absolute; top: 50%; transform: translateY(-50%);
