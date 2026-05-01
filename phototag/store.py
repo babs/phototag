@@ -193,6 +193,12 @@ class Store:
         self._tls = threading.local()
         # Held across BEGIN..COMMIT to serialize writers.
         self._write_lock = threading.RLock()
+        # Track every per-thread connection we've handed out so close() can
+        # release them all (TLS only covers the calling thread). A short-lived
+        # CLI doesn't care, but the FastAPI lifespan can outlive many worker
+        # threads; without this each thread leaked a SQLite handle until GC.
+        self._all_conns: list[sqlite3.Connection] = []
+        self._all_conns_lock = threading.Lock()
         # Touch the connection on the constructing thread so migrations run now.
         self._migrate()
 
@@ -208,12 +214,27 @@ class Store:
             # 5 s busy timeout absorbs brief writer contention without raising.
             c.execute("PRAGMA busy_timeout=5000")
             self._tls.conn = c
+            with self._all_conns_lock:
+                self._all_conns.append(c)
         return c
 
     def close(self) -> None:
-        c: sqlite3.Connection | None = getattr(self._tls, "conn", None)
-        if c is not None:
-            c.close()
+        # Close every connection handed out across threads. Best-effort —
+        # SQLite refuses cross-thread close on some versions, so swallow
+        # per-connection errors. Designed to be called at process shutdown
+        # / FastAPI lifespan teardown; concurrent queries on other threads
+        # would race and that's the caller's responsibility to avoid.
+        with self._all_conns_lock:
+            for c in self._all_conns:
+                try:
+                    c.close()
+                except sqlite3.Error:
+                    pass
+            self._all_conns.clear()
+        # Drop our own TLS slot so a re-use on the constructor thread
+        # opens a fresh connection instead of touching the closed one.
+        if hasattr(self._tls, "conn"):
+            self._tls.conn = None
             self._tls.conn = None
 
     def _migrate(self) -> None:
@@ -948,8 +969,15 @@ class Store:
         return int(cur.fetchone()["id"])
 
     def list_face_corrections(
-        self, *, face_id: int | None = None, action: str | None = None
+        self,
+        *,
+        face_id: int | None = None,
+        action: str | None = None,
+        actions: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        """Audit log read. `action` for a single value, `actions` for an IN
+        filter (used by `apply_sticky_corrections` to pre-filter to
+        named/unassigned at the SQL layer instead of in Python)."""
         sql = "SELECT id, face_id, image_id, action, cluster_id, name, created_at FROM face_corrections"
         params: list[Any] = []
         clauses: list[str] = []
@@ -959,36 +987,42 @@ class Store:
         if action is not None:
             clauses.append("action=?")
             params.append(action)
+        if actions:
+            placeholders = ",".join("?" * len(actions))
+            clauses.append(f"action IN ({placeholders})")
+            params.extend(actions)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id DESC"
         return [dict(r) for r in self.conn.execute(sql, params)]
 
     def compact_face_corrections(self) -> int:
-        """Collapse the audit log to the most-recent row per face_id.
+        """Collapse the audit log per face_id while preserving cannot-link.
 
-        The sticky-replay logic in `apply_sticky_corrections` already dedups
-        per face_id, keeping only the highest-id row — so older rows are dead
-        weight for matching purposes. We also keep just the most-recent
-        face_id IS NULL row (bulk-action audits like auto-attach summaries).
+        Two distinct invariants the post-pass relies on:
+        - `apply_sticky_corrections` picks the *most-recent* `named` /
+          `unassigned` per face → keep one survivor per (face_id, action).
+        - `cannot_link_identities_for_face` reads *every* `unassigned` row
+          for a face, joining to its cluster's `label_user`. Collapsing
+          all `unassigned` rows to one would lose the cannot-link set when
+          a face has rejected multiple identities historically.
 
-        The full historical sequence is intentionally lost; the audit table
-        is sized for matching, not forensics. Returns the row-delete count.
+        Strategy: keep all `unassigned` rows untouched; collapse the other
+        actions to one survivor per (face_id, action). Bulk-action audits
+        (`face_id IS NULL`) collapse to one survivor per action too.
         """
-        # COALESCE(face_id, -1) buckets all NULL face_id rows together so the
-        # GROUP BY yields a single survivor for them too — a plain GROUP BY
-        # face_id would emit one survivor per NULL (sqlite groups NULLs
-        # individually) or drop them entirely depending on the engine.
         cur = self.conn.execute(
             """
             DELETE FROM face_corrections
-            WHERE id NOT IN (
-                SELECT MAX(id) FROM face_corrections
-                GROUP BY COALESCE(face_id, -1)
-            )
+            WHERE action != 'unassigned'
+              AND id NOT IN (
+                  SELECT MAX(id) FROM face_corrections
+                  WHERE action != 'unassigned'
+                  GROUP BY COALESCE(face_id, -1), action
+              )
             """
         )
-        return int(cur.rowcount or 0)
+        return int(cur.rowcount)
 
     def cannot_link_identities_for_face(self, face_id: int) -> set[str]:
         """Identities this face must NOT be matched to (tier-2 sticky labels).
@@ -1641,6 +1675,10 @@ class Store:
             raise ValueError(f"survivor identity not found: {survivor}")
         if l_row is None:
             raise ValueError(f"loser identity not found: {loser}")
+        if int(s_row["dim"]) != int(l_row["dim"]):
+            # Mismatched embedding dimensions can't be blended. Refuse before
+            # the multiplication raises a less-helpful numpy error mid-txn.
+            raise ValueError(f"dim mismatch: {survivor}={s_row['dim']} vs {loser}={l_row['dim']}")
         # Cap matches phototag.faces.IDENTITY_SAMPLE_CAP=200; hard-coded here
         # to avoid pulling the heavy faces module into the store layer.
         cap = 200
@@ -1653,6 +1691,16 @@ class Store:
         self.upsert_face_identity(survivor, blended.astype(np.float32, copy=False), n_samples=total)
         renamed = self.rename_clusters_by_label(loser, survivor)
         self.delete_face_identity(loser)
+        # Audit log: every other identity-mutating action writes a corrections
+        # row; merge should too, so the audit trail captures structural changes
+        # alongside per-face actions.
+        self.log_face_correction(
+            face_id=None,
+            image_id=None,
+            action="merged",
+            cluster_id=None,
+            name=f"{loser} -> {survivor}",
+        )
         return {
             "survivor": survivor,
             "loser": loser,

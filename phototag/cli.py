@@ -219,6 +219,10 @@ def backup(
     src_path = settings.db_path
     t0 = time.monotonic()
     src = sqlite3.connect(str(src_path))
+    # 30 s busy timeout — backup contends with WAL writers; without this we
+    # raise immediately if a `phototag faces auto-attach --persist` (or any
+    # write txn) is in flight.
+    src.execute("PRAGMA busy_timeout=30000")
     try:
         dst = sqlite3.connect(str(tmp))
         try:
@@ -515,6 +519,10 @@ def doctor(
                         "UPDATE face_clusters SET size = ? WHERE id = ?",
                         (int(r["actual"]), int(r["cluster_id"])),
                     )
+            # Replace the original mismatch entry with the fix marker so the
+            # `ok` flag reflects the post-fix state. Scripts that chain
+            # `phototag doctor --fix && next-step` rely on the right exit signal.
+            issues.pop("face_cluster_size_mismatch", None)
             issues["face_cluster_size_fixed"] = len(bad_face_clusters)
         if fix and bad_img_clusters:
             with store.transaction():
@@ -523,12 +531,12 @@ def doctor(
                         "UPDATE clusters SET size = ? WHERE id = ?",
                         (int(r["actual"]), int(r["cluster_id"])),
                     )
+            issues.pop("image_cluster_size_mismatch", None)
             issues["image_cluster_size_fixed"] = len(bad_img_clusters)
 
-        ok = (
-            not any(k for k in issues if not k.endswith("_fixed") and k != "schema_version")
-            and "schema_version" not in issues
-        )
+        # `ok` ignores `_fixed` (resolved this run) and `schema_version`
+        # (resolved by re-opening the DB, not by a doctor write).
+        ok = not any(k for k in issues if not k.endswith("_fixed") and k != "schema_version")
         out = {"ok": ok, "issues": issues, "fix_applied": bool(fix)}
         log.info("doctor_summary", **{"ok": ok, "n_issue_kinds": len(issues)})
         typer.echo(json.dumps(out, indent=2, default=str))
@@ -940,13 +948,14 @@ def faces_corrections(
 def faces_corrections_compact(
     apply: Annotated[bool, typer.Option(help="actually delete; otherwise dry-run")] = False,
 ) -> None:
-    """Collapse `face_corrections` to the most-recent row per face_id.
+    """Collapse `face_corrections` to the most-recent row per (face_id, action).
 
     The audit log grows monotonically (one row per user action). The
-    sticky-replay pass already keeps only the most-recent row per face_id,
-    so older rows are dead weight: they bloat the DB and slow scans without
-    influencing matching. This command drops them; the very last row per
-    face_id (and per bulk NULL face_id batch) survives.
+    sticky-replay pass keeps only the most-recent `named` / `unassigned` per
+    face, so older same-action rows are dead weight. We collapse to one
+    survivor per (face_id, action) — but NEVER touch `unassigned` rows so
+    the tier-2 cannot-link set survives (the helper reads every unassigned
+    row to know which identities the user has rejected for this face).
 
     Default is a dry-run that reports the projected delete count.
     """
@@ -955,11 +964,22 @@ def faces_corrections_compact(
     store = Store(settings.db_path)
     try:
         before = int(store.conn.execute("SELECT COUNT(*) AS n FROM face_corrections").fetchone()["n"])
-        survivors = int(
+        # Survivors = every unassigned row (kept verbatim) + one per
+        # (face_id, action) for the other actions.
+        unassigned_kept = int(
             store.conn.execute(
-                "SELECT COUNT(*) AS n FROM (SELECT 1 FROM face_corrections GROUP BY COALESCE(face_id, -1))"
+                "SELECT COUNT(*) AS n FROM face_corrections WHERE action='unassigned'"
             ).fetchone()["n"]
         )
+        other_survivors = int(
+            store.conn.execute(
+                "SELECT COUNT(*) AS n FROM ("
+                "  SELECT 1 FROM face_corrections WHERE action!='unassigned' "
+                "  GROUP BY COALESCE(face_id, -1), action"
+                ")"
+            ).fetchone()["n"]
+        )
+        survivors = unassigned_kept + other_survivors
         projected = before - survivors
         deleted = 0
         if apply and projected:

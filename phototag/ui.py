@@ -1136,6 +1136,15 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         identities = s.list_face_identities()
         if not identities:
             return []
+        # Honor tier-2 sticky labels: if the user has previously rejected
+        # an identity for this face, don't suggest it back. Same filter as
+        # `attach_face_to_best_identity` so the popover never offers a
+        # match the system itself would refuse to attach.
+        cannot = s.cannot_link_identities_for_face(face_id)
+        if cannot:
+            identities = [i for i in identities if str(i["name"]) not in cannot]
+            if not identities:
+                return []
         same_dim, M = _identity_matrix(identities, dim)
         if M.shape[0] == 0:
             return []
@@ -1180,7 +1189,10 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 with Image.open(meta["path"]) as src_img:
                     cropped = crop_face(src_img, face["bbox"])
                     cropped.thumbnail((FACE_THUMB_SIZE, FACE_THUMB_SIZE))
-                    cropped.save(dst, format="JPEG", quality=85)
+                    # Atomic write — two concurrent face_thumb requests for
+                    # the same id would otherwise race (one truncates while
+                    # the other reads). Mirrors `_resized` for /thumb + /preview.
+                    _atomic_write_jpeg(dst, lambda p: cropped.save(p, format="JPEG", quality=85))
             except Exception as e:
                 log.warning("face_thumb_failed", face_id=face_id, error=str(e))
                 raise HTTPException(status_code=500, detail="thumb failed") from e

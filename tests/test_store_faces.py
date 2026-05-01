@@ -589,6 +589,40 @@ def test_auto_attach_orphans_honours_cannot_link(tmp_db: Path) -> None:
         store.close()
 
 
+def test_compact_preserves_cannot_link(tmp_db: Path) -> None:
+    """compact_face_corrections must keep every `unassigned` row so the
+    tier-2 sticky cannot-link set survives. A compactor that collapsed all
+    actions per face_id would silently re-suggest rejected identities."""
+    store = Store(tmp_db)
+    try:
+        run = store.create_face_run({"manual": True}, _now())
+        cid_anne = store.add_face_cluster(
+            run_id=run, cluster_no=0, size=0, label_auto=None, label_user="Anne"
+        )
+        img = _add_image(store, path="/tmp/a.jpg")
+        fid = _add_face(store, img)
+        # Sequence: user names face X "Bea" yesterday, then today rejects
+        # "Anne" via /unassign, then tomorrow names it again.
+        store.log_face_correction(face_id=fid, image_id=img, action="named", name="Bea")
+        store.log_face_correction(face_id=fid, image_id=img, action="unassigned", cluster_id=cid_anne)
+        store.log_face_correction(face_id=fid, image_id=img, action="named", name="Bea")
+
+        before = store.list_face_corrections(face_id=fid)
+        assert len(before) == 3
+        cannot_before = store.cannot_link_identities_for_face(fid)
+        assert "Anne" in cannot_before
+
+        deleted = store.compact_face_corrections()
+        # 2 `named` collapse to 1, `unassigned` survives → 2 rows total.
+        after = store.list_face_corrections(face_id=fid)
+        assert len(after) == 2
+        assert deleted == 1
+        cannot_after = store.cannot_link_identities_for_face(fid)
+        assert cannot_after == cannot_before
+    finally:
+        store.close()
+
+
 def test_purge_faces(tmp_db: Path) -> None:
     store = Store(tmp_db)
     try:

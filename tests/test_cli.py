@@ -143,6 +143,12 @@ def test_doctor_detects_and_fixes_size_mismatch(tmp_path: Path, monkeypatch: pyt
     payload = _last_json(r.stdout)
     assert payload["fix_applied"] is True
     assert payload["issues"].get("face_cluster_size_fixed") == 1
+    # `ok` must reflect the post-fix state. The original
+    # face_cluster_size_mismatch key is replaced by `_fixed`, so nothing
+    # un-resolved remains and `ok` should flip true. Scripts chain
+    # `phototag doctor --fix && next-step` on this signal.
+    assert payload["ok"] is True
+    assert "face_cluster_size_mismatch" not in payload["issues"]
     s = Store(db)
     row = s.conn.execute("SELECT size FROM face_clusters WHERE id=?", (cid,)).fetchone()
     assert row["size"] == 1

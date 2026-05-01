@@ -615,12 +615,12 @@ def apply_sticky_corrections(store: Store, run_id: int) -> dict[str, int]:
     ).fetchone()
     noise_cid = int(noise_row["id"]) if noise_row else None
 
-    # Fetch only the actions this pass actually consumes — `verified` /
-    # `unverified` / `deleted` rows would otherwise mask older `named` /
-    # `unassigned` rows under the per-face dedup. SQL also caps the scan to
-    # the relevant action set so a long-lived corrections table doesn't slow
-    # down every cluster_faces call linearly.
-    corrections = [c for c in store.list_face_corrections() if c["action"] in ("named", "unassigned")]
+    # SQL filter to the actions this pass actually consumes — `verified` /
+    # `unverified` / `deleted` / `merged` rows would otherwise mask older
+    # `named` / `unassigned` rows under the per-face dedup, and the table
+    # grows monotonically so a long-lived corpus would scan O(N) audit rows
+    # on every cluster_faces call.
+    corrections = store.list_face_corrections(actions=["named", "unassigned"])
     # Most-recent-first (list_face_corrections returns ORDER BY id DESC)
     # → keep the latest user intent per face.
     seen: set[int] = set()
