@@ -162,13 +162,18 @@ def prune(
         if limit is not None:
             rows = rows[:limit]
         counts["checked"] = len(rows)
-        # Single existence check per row (re-checking on --apply could double
-        # the cost on a slow / network-mounted corpus).
+        # Existence check is the long pole on a network-mounted corpus
+        # (each stat() is a round-trip). Run in a thread pool so 16 stats
+        # overlap their latency. Local filesystems also win marginally.
+        from concurrent.futures import ThreadPoolExecutor
+
         missing_ids: list[int] = []
-        for r in rows:
-            if not Path(r.path).exists():
-                missing_ids.append(r.id)
-                missing_paths.append(r.path)
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            results = list(ex.map(lambda r: (r.id, r.path, Path(r.path).exists()), rows))
+        for image_id, path, present in results:
+            if not present:
+                missing_ids.append(image_id)
+                missing_paths.append(path)
         counts["missing"] = len(missing_ids)
         if apply and missing_ids:
             with store.transaction():
@@ -383,59 +388,75 @@ def doctor(
     store = Store(settings.db_path)
     issues: dict[str, Any] = {}
     try:
-        # Schema version sanity.
-        row = store.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-        cur_ver = int(row["value"]) if row else 0
-        expected = len(_store_mod.MIGRATIONS)
-        if cur_ver != expected:
-            issues["schema_version"] = {"current": cur_ver, "expected": expected}
+        # The five diagnostic SELECTs are independent and read-only — fan
+        # them out in a thread pool so a 100k-face DB doesn't serialize the
+        # full-table scans (each thread gets its own SQLite connection via
+        # Store's thread-local pool, and WAL allows concurrent readers).
+        from concurrent.futures import ThreadPoolExecutor
 
-        # face_clusters.size vs actual assignments.
-        bad_face_clusters = store.conn.execute(
-            """
-            SELECT fc.id AS cluster_id, fc.size AS recorded,
-                   IFNULL((SELECT COUNT(*) FROM face_cluster_assignments fca
-                           WHERE fca.cluster_id = fc.id), 0) AS actual
-            FROM face_clusters fc
-            WHERE fc.size != IFNULL((SELECT COUNT(*) FROM face_cluster_assignments fca
-                                     WHERE fca.cluster_id = fc.id), 0)
-            """
-        ).fetchall()
-        if bad_face_clusters:
-            issues["face_cluster_size_mismatch"] = [dict(r) for r in bad_face_clusters]
-
-        # clusters.size vs actual image_clusters.
-        bad_img_clusters = store.conn.execute(
-            """
-            SELECT c.id AS cluster_id, c.size AS recorded,
-                   IFNULL((SELECT COUNT(*) FROM image_clusters ic
-                           WHERE ic.cluster_id = c.id), 0) AS actual
-            FROM clusters c
-            WHERE c.size != IFNULL((SELECT COUNT(*) FROM image_clusters ic
-                                    WHERE ic.cluster_id = c.id), 0)
-            """
-        ).fetchall()
-        if bad_img_clusters:
-            issues["image_cluster_size_mismatch"] = [dict(r) for r in bad_img_clusters]
-
-        # Faces with empty embedding bytes.
-        bad_emb = store.conn.execute(
-            "SELECT id FROM faces WHERE embedding IS NULL OR LENGTH(embedding) = 0"
-        ).fetchall()
-        if bad_emb:
-            issues["faces_no_embedding"] = [int(r["id"]) for r in bad_emb][:50]
-
-        # Identity rows whose name no longer appears in any face_clusters.label_user.
-        orphan_idents = store.conn.execute(
-            """
-            SELECT fi.name FROM face_identities fi
-            WHERE NOT EXISTS (
-                SELECT 1 FROM face_clusters fc WHERE fc.label_user = fi.name
+        def _q_schema() -> tuple[str, Any]:
+            row = store.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            cur_ver = int(row["value"]) if row else 0
+            expected = len(_store_mod.MIGRATIONS)
+            return (
+                ("schema_version", {"current": cur_ver, "expected": expected})
+                if cur_ver != expected
+                else ("", None)
             )
-            """
-        ).fetchall()
-        if orphan_idents:
-            issues["orphan_identities"] = [r["name"] for r in orphan_idents]
+
+        def _q_face_cluster_size() -> tuple[str, Any]:
+            rows = store.conn.execute(
+                """
+                SELECT fc.id AS cluster_id, fc.size AS recorded,
+                       IFNULL((SELECT COUNT(*) FROM face_cluster_assignments fca
+                               WHERE fca.cluster_id = fc.id), 0) AS actual
+                FROM face_clusters fc
+                WHERE fc.size != IFNULL((SELECT COUNT(*) FROM face_cluster_assignments fca
+                                         WHERE fca.cluster_id = fc.id), 0)
+                """
+            ).fetchall()
+            return ("face_cluster_size_mismatch", [dict(r) for r in rows]) if rows else ("", None)
+
+        def _q_img_cluster_size() -> tuple[str, Any]:
+            rows = store.conn.execute(
+                """
+                SELECT c.id AS cluster_id, c.size AS recorded,
+                       IFNULL((SELECT COUNT(*) FROM image_clusters ic
+                               WHERE ic.cluster_id = c.id), 0) AS actual
+                FROM clusters c
+                WHERE c.size != IFNULL((SELECT COUNT(*) FROM image_clusters ic
+                                        WHERE ic.cluster_id = c.id), 0)
+                """
+            ).fetchall()
+            return ("image_cluster_size_mismatch", [dict(r) for r in rows]) if rows else ("", None)
+
+        def _q_no_emb() -> tuple[str, Any]:
+            rows = store.conn.execute(
+                "SELECT id FROM faces WHERE embedding IS NULL OR LENGTH(embedding) = 0"
+            ).fetchall()
+            return ("faces_no_embedding", [int(r["id"]) for r in rows][:50]) if rows else ("", None)
+
+        def _q_orphan_idents() -> tuple[str, Any]:
+            rows = store.conn.execute(
+                """
+                SELECT fi.name FROM face_identities fi
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM face_clusters fc WHERE fc.label_user = fi.name
+                )
+                """
+            ).fetchall()
+            return ("orphan_identities", [r["name"] for r in rows]) if rows else ("", None)
+
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            for key, value in ex.map(
+                lambda f: f(),
+                [_q_schema, _q_face_cluster_size, _q_img_cluster_size, _q_no_emb, _q_orphan_idents],
+            ):
+                if key:
+                    issues[key] = value
+
+        bad_face_clusters = issues.get("face_cluster_size_mismatch") or []
+        bad_img_clusters = issues.get("image_cluster_size_mismatch") or []
 
         if fix and bad_face_clusters:
             with store.transaction():

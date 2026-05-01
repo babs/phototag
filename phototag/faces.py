@@ -22,6 +22,13 @@ log = get_logger(__name__)
 
 MODEL_NAME = "insightface_buffalo_l_v1"
 EMBED_DIM = 512
+# Cap the n_samples weight when blending an identity's centroid with new
+# evidence. Without a cap, an identity that has accumulated thousands of
+# samples becomes immutable — a one-photo recluster can never shift it
+# back, and the person ageing/changing slowly drifts the *true* mean away
+# from the stored centroid. 200 keeps long-term identities stable while
+# allowing slow drift to follow the person.
+IDENTITY_SAMPLE_CAP = 200
 # Detection input is resized to this max side. Bboxes are stored in this same
 # coord space so they line up directly with the lightbox's /preview/{id} image
 # (which is also clamped to 1280 px). Faces smaller than ~30 px in this space
@@ -347,12 +354,16 @@ def cluster_faces(
             # erase a hundred-photo identity).
             if lv != -1 and label_user is not None:
                 hit = identity_assignment[lv]
-                n_old = int(hit.get("n_samples", 0)) or 0
+                # Cap the prior weight so a long-lived identity can still
+                # drift on new evidence (see IDENTITY_SAMPLE_CAP).
+                n_old = min(int(hit.get("n_samples", 0)) or 0, IDENTITY_SAMPLE_CAP)
                 old_c = np.asarray(hit["centroid"], dtype=np.float32)
                 blended = ((old_c * n_old + emb_centroids[lv] * len(m)) / max(1, n_old + len(m))).astype(
                     np.float32, copy=False
                 )
-                store.upsert_face_identity(label_user, blended, n_samples=n_old + len(m))
+                # Display counter keeps the true sample count.
+                true_n = (int(hit.get("n_samples", 0)) or 0) + len(m)
+                store.upsert_face_identity(label_user, blended, n_samples=true_n)
 
     # Tier-1 sticky-label post-pass: replay user corrections so a 'named'
     # action you took last week survives this re-cluster, and an 'unassigned'
@@ -544,12 +555,16 @@ def cluster_orphan_faces(
                     store.assign_face_to_cluster(fid, cid, distance=d)
             if hit is not None and label_user is not None:
                 # Sample-weighted blend (same as cluster_faces).
-                n_old = int(hit.get("n_samples", 0)) or 0
+                # Cap the prior weight so a long-lived identity can still
+                # drift on new evidence (see IDENTITY_SAMPLE_CAP).
+                n_old = min(int(hit.get("n_samples", 0)) or 0, IDENTITY_SAMPLE_CAP)
                 old_c = np.asarray(hit["centroid"], dtype=np.float32)
                 blended = ((old_c * n_old + emb_centroids[lv] * len(m)) / max(1, n_old + len(m))).astype(
                     np.float32, copy=False
                 )
-                store.upsert_face_identity(label_user, blended, n_samples=n_old + len(m))
+                # Display counter keeps the true sample count.
+                true_n = (int(hit.get("n_samples", 0)) or 0) + len(m)
+                store.upsert_face_identity(label_user, blended, n_samples=true_n)
 
     # Tier-1 sticky-label post-pass on the orphan run too.
     sticky: dict[str, int] = {"named": 0, "unassigned": 0}
@@ -765,8 +780,10 @@ def attach_face_to_best_identity(
         )
         store.assign_face_to_cluster(face_id, cid, distance=float(1.0 - best_sim))
 
-    # Sample-weighted centroid update (same shape as cluster_faces).
-    blended = ((best_centroid * best_n + emb) / max(1, best_n + 1)).astype(np.float32, copy=False)
+    # Sample-weighted centroid update — cap the prior weight so identities
+    # keep drifting on fresh evidence (see IDENTITY_SAMPLE_CAP).
+    n_eff = min(best_n, IDENTITY_SAMPLE_CAP)
+    blended = ((best_centroid * n_eff + emb) / max(1, n_eff + 1)).astype(np.float32, copy=False)
     store.upsert_face_identity(best_name, blended, n_samples=best_n + 1)
 
     # Auto-validate only when the match is comfortably above threshold —
