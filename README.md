@@ -154,7 +154,8 @@ Core install (`uv sync` without extras) works without any model.
 Weights:
 - RAM++ (~5 GB) — download `ram_plus_swin_large_14m.pth` from the
   [recognize-anything](https://github.com/xinyu1205/recognize-anything)
-  upstream into `data/models/`.
+  upstream into `$XDG_CACHE_HOME/phototag/models/` (default
+  `~/.cache/phototag/models/`; override with `APP_MODELS_DIR`).
 - InsightFace buffalo_l (~200 MB) — auto-downloads on first
   `phototag faces detect`.
 - open_clip ViT-B/32 — auto-downloads on first `phototag embed`.
@@ -306,7 +307,7 @@ end-of-file-fixer, check-yaml/toml.
 | `APP_LOG_LEVEL` | `INFO` | structlog level |
 | `APP_JSON_LOGS` | auto | force json/console; auto = TTY detect |
 | `APP_DB_PATH` | `phototag.db` | SQLite file location |
-| `APP_MODELS_DIR` | `data/models` | weights cache |
+| `APP_MODELS_DIR` | `$XDG_CACHE_HOME/phototag/models` | weights cache (per-user, outside library bundle) |
 | `APP_DEVICE` | `auto` | `auto` / `cpu` / `cuda` |
 | `APP_API_TOKEN` | (unset) | shared secret for the UI; empty disables auth |
 | `APP_API_TOKEN_FILE` | (unset) | file path to a secret; re-read per request (hot rotation) |

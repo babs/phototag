@@ -199,7 +199,7 @@ def prune(
 def backup(
     out: Annotated[
         Path | None,
-        typer.Option(help="output snapshot path (default: data/backups/phototag-<UTC-iso>.db)"),
+        typer.Option(help="output snapshot path (default: <db_path.parent>/backups/phototag-<UTC-iso>.db)"),
     ] = None,
 ) -> None:
     """Create an atomic SQLite snapshot of the DB via the online-backup API.
@@ -216,7 +216,7 @@ def backup(
     log = get_logger("phototag.backup")
     if out is None:
         ts = datetime.now(UTC).isoformat(timespec="seconds").replace(":", "-")
-        out = Path("data/backups") / f"phototag-{ts}.db"
+        out = settings.data_dir / "backups" / f"phototag-{ts}.db"
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(out.suffix + ".tmp")
     if tmp.exists():

@@ -12,9 +12,13 @@ uv run pre-commit install            # optional, for contributors
 ```
 
 The first `phototag faces detect` triggers a one-time ~200 MB download of
-InsightFace weights into `data/models/insightface/`. RAM++ weights live
-under `data/models/ram_plus_swin_large_14m.pth` (download from the RAM
-upstream once, ~5 GB).
+InsightFace weights into `$XDG_CACHE_HOME/phototag/models/insightface/`
+(default `~/.cache/phototag/models/insightface/`). RAM++ weights live
+under `~/.cache/phototag/models/ram_plus_swin_large_14m.pth` (download
+from the RAM upstream once, ~5 GB). Override the location with
+`APP_MODELS_DIR=/path/to/cache` if you want them elsewhere — the cache
+is per-user and shared across libraries, so it's intentionally outside
+the library bundle (`db_path.parent`).
 
 ## 2. Point at your photo library
 
@@ -162,8 +166,9 @@ uv run phototag faces refine-noise --persist           # picks up named identiti
 # or, to attach orphans without touching cluster topology:
 uv run phototag faces auto-attach --persist
 
-# Snapshot the DB before something destructive
-uv run phototag backup --out data/backups/$(date -u +%Y%m%dT%H%M%S).db
+# Snapshot the DB before something destructive (default dst lives next
+# to the DB: `<db_path.parent>/backups/phototag-<UTC-iso>.db`)
+uv run phototag backup
 
 # Catch DB drift
 uv run phototag doctor --fix
@@ -174,8 +179,16 @@ uv run phototag prune --apply
 
 ## 10. Where things live
 
-- `data/` — gitignored; DBs (`*.db`), model weights, EXIF cache, thumbs,
-  preview JPEGs, face thumbnails, server logs, backups.
+- `data/` (or wherever `APP_DB_PATH` points) — the **library bundle**:
+  the SQLite DB plus everything derived from it (`pictures/` symlink,
+  `thumbs-cache/`, `previews-cache/`, `face-thumbs-cache/`, `backups/`,
+  server logs). Move `APP_DB_PATH` and the whole bundle moves with it.
+  The repo's `data/` is gitignored.
+- Models live **outside** the library bundle, in
+  `$XDG_CACHE_HOME/phototag/models/` (default `~/.cache/phototag/models/`).
+  They're per-user and shared across libraries — keeping them out of
+  the bundle avoids ballooning every backup / rsync. Override via
+  `APP_MODELS_DIR=`.
 - `phototag.db` (or `data/full.db` via `APP_DB_PATH`) — single SQLite
   file, WAL-mode, schema migrations are numbered + atomic.
 - `report*/` — generated HTML reports.
@@ -195,7 +208,7 @@ uv run phototag prune --apply
 | `APP_LOG_LEVEL` | `INFO` | structlog level |
 | `APP_JSON_LOGS` | auto | force json/console; auto = TTY detect |
 | `APP_DB_PATH` | `phototag.db` | SQLite file |
-| `APP_MODELS_DIR` | `data/models` | weights cache |
+| `APP_MODELS_DIR` | `$XDG_CACHE_HOME/phototag/models` | weights cache (per-user, outside library bundle) |
 | `APP_DEVICE` | `auto` | `auto` / `cpu` / `cuda` |
 | `APP_API_TOKEN` | (unset) | static shared secret for the UI |
 | `APP_API_TOKEN_FILE` | (unset) | path to a token file (re-read per request) |

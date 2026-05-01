@@ -49,9 +49,12 @@ log = get_logger(__name__)
 THUMB_SIZE = 320  # sidebar / grid thumb max side
 PREVIEW_SIZE = 1280  # lightbox preview; matches faces.DETECT_MAX_SIDE
 FACE_THUMB_SIZE = 192  # /face-thumb/{id} crop max side
-THUMB_CACHE = Path("data/thumbs-cache")
-PREVIEW_CACHE = Path("data/previews-cache")
-FACE_THUMB_CACHE = Path("data/face-thumbs-cache")
+# Cache directory NAMES are constants; the parent (data_dir) is resolved
+# at app-start time from settings.db_path.parent so moving the DB moves
+# the caches with it. See `create_app` for the binding.
+THUMB_CACHE_NAME = "thumbs-cache"
+PREVIEW_CACHE_NAME = "previews-cache"
+FACE_THUMB_CACHE_NAME = "face-thumbs-cache"
 
 
 class RenameRequest(BaseModel):
@@ -134,9 +137,18 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     db = db_path or settings.db_path
     api_token = settings.api_token or None
     api_token_file = settings.api_token_file or None
-    THUMB_CACHE.mkdir(parents=True, exist_ok=True)
-    PREVIEW_CACHE.mkdir(parents=True, exist_ok=True)
-    FACE_THUMB_CACHE.mkdir(parents=True, exist_ok=True)
+    # Caches anchor on the DB's parent so the whole library bundle
+    # (DB + pictures symlink + caches + backups) moves as a unit when
+    # APP_DB_PATH points elsewhere. `db_path` (the create_app override)
+    # wins over `settings.db_path` so test fixtures + the CLI both end
+    # up with the right anchor.
+    data_dir = db.parent
+    thumb_cache = data_dir / THUMB_CACHE_NAME
+    preview_cache = data_dir / PREVIEW_CACHE_NAME
+    face_thumb_cache = data_dir / FACE_THUMB_CACHE_NAME
+    thumb_cache.mkdir(parents=True, exist_ok=True)
+    preview_cache.mkdir(parents=True, exist_ok=True)
+    face_thumb_cache.mkdir(parents=True, exist_ok=True)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -989,7 +1001,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
         # Evict the cached face thumb so the next /face-thumb/{id} re-renders
         # from the new bbox. Best-effort; thumb regeneration is idempotent.
-        thumb = FACE_THUMB_CACHE / f"{face_id}.jpg"
+        thumb = face_thumb_cache / f"{face_id}.jpg"
         try:
             thumb.unlink(missing_ok=True)
         except Exception as e:
@@ -1170,11 +1182,11 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
     @app.get("/thumb/{image_id}")
     def thumb(image_id: int) -> FileResponse:
-        return _serve_resized(image_id, THUMB_CACHE, THUMB_SIZE, 82)
+        return _serve_resized(image_id, thumb_cache, THUMB_SIZE, 82)
 
     @app.get("/preview/{image_id}")
     def preview(image_id: int) -> FileResponse:
-        return _serve_resized(image_id, PREVIEW_CACHE, PREVIEW_SIZE, 85)
+        return _serve_resized(image_id, preview_cache, PREVIEW_SIZE, 85)
 
     @app.get("/raw/{image_id}")
     def raw(image_id: int) -> FileResponse:
@@ -1506,7 +1518,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         meta = s.get_image(int(face["image_id"]))
         if meta is None:
             raise HTTPException(status_code=404, detail="image not found")
-        dst = FACE_THUMB_CACHE / f"{face_id}.jpg"
+        dst = face_thumb_cache / f"{face_id}.jpg"
         if not dst.exists():
             try:
                 from .faces import crop_face

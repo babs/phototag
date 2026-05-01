@@ -54,7 +54,7 @@ phototag version
 | `export` | Dump tags/metadata to JSON or CSV |
 | `prune` | Drop DB rows whose file is gone from disk (default dry-run) |
 | `doctor` | Health-check the DB; flag size mismatches, orphan identities, schema-version drift; `--fix` recomputes safe items |
-| `backup` | Create an SQLite snapshot of the DB (atomic, online; default dst `data/backups/phototag-<UTC-iso>.db`) |
+| `backup` | Create an SQLite snapshot of the DB (atomic, online; default dst `<db_path.parent>/backups/phototag-<UTC-iso>.db`) |
 | `rename` / `rename-bulk` | Bulk-set `clusters.label_user` |
 | `info` | Inspect tags + EXIF + face overlay for one image (DB row + filesystem) |
 | `version` | Print the installed package version |

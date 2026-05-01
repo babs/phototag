@@ -45,7 +45,7 @@
 
 - **Disk full mid-scan** — fail fast, no silent retry. WAL mode keeps DB consistent.
 - **Concurrent CLI invocations** — SQLite `busy_timeout=5000` absorbs brief contention; past that the second writer raises `sqlite3.OperationalError: database is locked` and exits non-zero. Single-writer assumption holds; we don't try fancy multi-writer.
-- **Model download on first run** — slow, network-dependent. Cache under `data/models/` (configurable via `APP_MODELS_DIR`). RAM++ weights must be downloaded manually from the [recognize-anything upstream](https://github.com/xinyu1205/recognize-anything); InsightFace and open_clip auto-download on first use. A pre-warming command (`phototag models download`) was planned but not shipped — the auto-download on first inference run is sufficient in practice.
+- **Model download on first run** — slow, network-dependent. Cache under `$XDG_CACHE_HOME/phototag/models/` (default `~/.cache/phototag/models/`; configurable via `APP_MODELS_DIR`). Models are intentionally outside the library bundle (`db_path.parent`) so per-user weights aren't duplicated alongside every library / backed up redundantly. RAM++ weights must be downloaded manually from the [recognize-anything upstream](https://github.com/xinyu1205/recognize-anything); InsightFace and open_clip auto-download on first use. A pre-warming command (`phototag models download`) was planned but not shipped — the auto-download on first inference run is sufficient in practice.
 
 ## Unknowns to resolve early
 

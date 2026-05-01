@@ -19,7 +19,7 @@ For every photo in the library, find faces and group them by identity so the use
 | Clustering | UMAP + HDBSCAN | Re-use existing module |
 | License | InsightFace under MIT-ish terms | Compatible with project Apache-2.0 |
 
-`[face]` extra: `insightface>=0.7`, `onnxruntime>=1.18`. Weights (~200 MB) auto-download on first use into `data/models/insightface/`.
+`[face]` extra: `insightface>=0.7`, `onnxruntime>=1.18`. Weights (~200 MB) auto-download on first use into `$XDG_CACHE_HOME/phototag/models/insightface/` (default `~/.cache/phototag/models/insightface/`; override via `APP_MODELS_DIR`).
 
 ## Schema additions
 
