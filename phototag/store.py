@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime as _dt
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -1084,7 +1084,8 @@ class Store:
         vecs = [np.frombuffer(row["embedding"], dtype=np.float32, count=int(row["dim"])) for row in cur]
         if not vecs:
             return None
-        return np.mean(np.vstack(vecs), axis=0).astype(np.float32)
+        # cast: numpy stubs widen `.astype` to Any; runtime is np.ndarray.
+        return cast(np.ndarray, np.mean(np.vstack(vecs), axis=0).astype(np.float32))
 
     def delete_face_identity(self, name: str) -> None:
         self.conn.execute("DELETE FROM face_identities WHERE name=?", (name,))
@@ -1824,8 +1825,18 @@ class Store:
 
     def record_identity_attach_sim(self, name: str, sim: float) -> None:
         """Fold one fresh auto-attach cosine sim into the identity's running
-        Welford stats. No-op if the identity does not yet exist (caller is
-        expected to upsert first). Caller MUST hold a write transaction.
+        Welford stats. Caller MUST hold a write transaction.
+
+        Contract — silent no-op when no row matches `name`. The single in-
+        repo caller (`attach_face_to_best_identity`) calls
+        `upsert_face_identity(name, …)` immediately before this, so the
+        match is guaranteed by construction. We don't raise on a miss
+        because the test surface relies on the no-op (a stray invocation
+        from a future caller shouldn't crash a hot path), and the SQL
+        couldn't usefully synthesize stats for a row that doesn't exist
+        yet — Welford requires the prior `(sim_n, sim_mean, sim_M2)`. Any
+        future caller that doesn't upsert first must not assume stats
+        were folded in: log + verify with `list_face_identities()`.
 
         Algorithm (Welford, numerically stable):
             n_new    = n + 1
@@ -1835,6 +1846,9 @@ class Store:
             M2_new   = M2 + delta * delta2
 
         We fold this in SQL so we don't need a read-modify-write hop.
+        SQLite evaluates every SET expression against pre-update column
+        values (per spec), so the chained references to `sim_mean` /
+        `sim_n` inside the UPDATE all see the same starting state.
         """
         self.conn.execute(
             """

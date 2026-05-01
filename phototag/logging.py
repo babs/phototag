@@ -1,5 +1,6 @@
 import logging
 import sys
+from typing import cast
 
 import structlog
 
@@ -31,4 +32,6 @@ def setup_logging(*, log_level: str = "INFO", json_logs: bool | None = None) -> 
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
-    return structlog.get_logger(name)
+    # `structlog.get_logger` returns `Any` per its stubs; cast to the
+    # configured BoundLogger type so callers don't lose autocomplete.
+    return cast("structlog.stdlib.BoundLogger", structlog.get_logger(name))

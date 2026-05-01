@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 from PIL import Image
@@ -49,7 +50,9 @@ class ClipEmbedder:
         with torch.no_grad():
             feats = self.model.encode_image(batch)
             feats = feats / feats.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        return feats.detach().cpu().numpy().astype(np.float32, copy=False)
+        # cast: open_clip / torch stubs widen .numpy() to Any; the runtime
+        # array is float32 by construction.
+        return cast(np.ndarray, feats.detach().cpu().numpy().astype(np.float32, copy=False))
 
     def embed_texts(self, texts: list[str]) -> np.ndarray:
         if not texts:
@@ -59,4 +62,4 @@ class ClipEmbedder:
         with torch.no_grad():
             feats = self.model.encode_text(tokens)
             feats = feats / feats.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        return feats.detach().cpu().numpy().astype(np.float32, copy=False)
+        return cast(np.ndarray, feats.detach().cpu().numpy().astype(np.float32, copy=False))

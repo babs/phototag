@@ -39,9 +39,10 @@ jobs:
       - name: Sync core deps + UI extra
         run: uv sync --extra ui --group dev
 
-      # Run the same pre-commit hook stack devs run locally — pinned mypy
-      # additional_dependencies so CI doesn't surface stricter
-      # `warn_return_any` errors than the dev environment can see.
+      # Run the same pre-commit hook stack devs use locally — single source
+      # of truth for ruff lint/format, mypy, secrets, pyupgrade. mypy is
+      # also clean against the unpinned env (`uv run mypy phototag`); we
+      # route through pre-commit purely for dev/CI consistency.
       - name: pre-commit (lint, format, mypy, secrets, pyupgrade)
         run: uv run pre-commit run --all-files --show-diff-on-failure
 

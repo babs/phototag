@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -366,9 +366,15 @@ def cluster_faces(
     must-link pairs (same `named` name) and cannot-link pairs (`unassigned`
     against a labelled cluster) from `face_corrections`, then surgically
     rewrite the precomputed UMAP-Euclidean distance matrix before HDBSCAN.
-    The post-pass tier-1 (replay named) + tier-2 (replay unassigned via
-    attach helper) still run on top — tier-3 is a *during-clustering*
-    nudge, not a replacement.
+
+    Caveat — distance-matrix surgery is NOT a hard cannot-link guarantee:
+    HDBSCAN's mutual-reachability is transitive, so two cannot-link points
+    can still end up in the same cluster via a third bridging point with
+    short distances to both. The post-pass tier-1 (replay named) + tier-2
+    (replay unassigned via the attach helper) provide the strict
+    enforcement on top — tier-3 is a *during-clustering* nudge that lifts
+    average quality, the post-passes are what guarantee user corrections
+    actually stick.
     """
     import hdbscan
     import umap
@@ -824,7 +830,8 @@ def _identity_matrix(identities: list[dict[str, Any]], dim: int) -> tuple[list[d
 def _normalize_rows(M: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(M, axis=1, keepdims=True)
     n[n == 0] = 1.0
-    return M / n
+    # cast: numpy ufunc stubs widen the result to Any; runtime is np.ndarray.
+    return cast(np.ndarray, M / n)
 
 
 def attach_face_to_best_identity(

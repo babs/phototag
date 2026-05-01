@@ -203,7 +203,13 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         _PUBLIC = ("/", "/healthz", "/favicon.ico")
         _static_token: str | None = api_token
         _token_file: Path | None = api_token_file
-        _last_seen: dict[str, str | None] = {"value": None}
+        # mtime-keyed cache so we don't pay a `read_text()` syscall on
+        # every protected request — only when the file actually changes
+        # (rotation). One stat() per request is ~1 µs on a local SSD,
+        # vs. ~10 µs for read_text+decode+strip+commit; the saved cycles
+        # are bigger than they sound on a busy LAN. (rM1)
+        _cache: dict[str, float | str | None] = {"mtime_ns": -1, "value": None}
+        _cache_lock = threading.Lock()
 
         def _current_token() -> tuple[str | None, str | None]:
             """Return (token, error). Error is non-None when misconfigured /
@@ -211,20 +217,41 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             silently letting the request through."""
             if _token_file is not None:
                 try:
-                    raw = _token_file.read_text().strip()
+                    st = _token_file.stat()
                 except OSError as e:
-                    log.error("api_token_file_read_failed", path=str(_token_file), error=str(e))
+                    log.error("api_token_file_stat_failed", path=str(_token_file), error=str(e))
                     return None, "auth misconfigured: token file unreadable"
-                if not raw:
+                # Re-read only when mtime advanced. The lock prevents two
+                # concurrent first-readers from racing the cache fill (each
+                # would do its own read; cheap but wasteful under load).
+                cached_mtime = _cache["mtime_ns"]
+                cached_value = _cache["value"]
+                if not isinstance(cached_value, str) or cached_mtime != st.st_mtime_ns:
+                    with _cache_lock:
+                        # Re-check inside the lock — another thread may have
+                        # filled the cache while we were waiting.
+                        if _cache["mtime_ns"] != st.st_mtime_ns:
+                            try:
+                                raw = _token_file.read_text().strip()
+                            except OSError as e:
+                                log.error(
+                                    "api_token_file_read_failed",
+                                    path=str(_token_file),
+                                    error=str(e),
+                                )
+                                return None, "auth misconfigured: token file unreadable"
+                            prev = _cache["value"]
+                            if isinstance(prev, str) and prev != raw and raw:
+                                log.info("api_token_rotated", source="file")
+                            _cache["value"] = raw if raw else None
+                            _cache["mtime_ns"] = st.st_mtime_ns
+                        cached_value = _cache["value"]
+                if not isinstance(cached_value, str) or not cached_value:
                     if _static_token:
                         # Empty file but a fallback static token exists — use it.
                         return _static_token, None
                     return None, "auth misconfigured: token file empty and no APP_API_TOKEN"
-                prev = _last_seen["value"]
-                if prev is not None and prev != raw:
-                    log.info("api_token_rotated", source="file")
-                _last_seen["value"] = raw
-                return raw, None
+                return cached_value, None
             # Static-only path; api_token is guaranteed truthy here.
             return _static_token, None
 
@@ -801,16 +828,10 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         if not src_path.exists():
             raise HTTPException(status_code=404, detail="file missing on disk")
 
-        # Lazy-load detector once per process (mirrors api_redetect_faces).
-        det = app.state.face_detector
-        if det is None:
-            with app.state.face_detector_lock:
-                det = app.state.face_detector
-                if det is None:
-                    settings = load_settings()
-                    det = FaceDetector(settings.models_dir, device=settings.device)
-                    app.state.face_detector = det
-
+        # Open + thumbnail FIRST so we can validate the bbox against the
+        # actual image dimensions before paying the ~200 MB cost of loading
+        # the insightface model. This also keeps the validation surface
+        # testable without [face] extras installed.
         try:
             with _Image.open(src_path) as raw:
                 raw.load()
@@ -836,6 +857,18 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             # 24 px is the practical floor for RetinaFace at this resolution;
             # below that detection collapses to noise and we'd return junk.
             raise HTTPException(status_code=422, detail="bbox too small (need ≥24×24)")
+
+        # Lazy-load detector once per process (mirrors api_redetect_faces).
+        # Done AFTER validation so a malformed/too-small bbox doesn't pay
+        # the model-load cost just to be rejected.
+        det = app.state.face_detector
+        if det is None:
+            with app.state.face_detector_lock:
+                det = app.state.face_detector
+                if det is None:
+                    settings = load_settings()
+                    det = FaceDetector(settings.models_dir, device=settings.device)
+                    app.state.face_detector = det
 
         # Pad the crop so RetinaFace has context — it expects faces to sit
         # inside a frame that includes some shoulders / hair / background.
