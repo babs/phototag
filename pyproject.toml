@@ -59,7 +59,10 @@ ui = [
     "fastapi-structured-logging>=0.5",
     "jinja2>=3.1",
 ]
-all = ["phototag[ram,clip,cluster,report,heic,raw,exif,geo,face,ui]"]
+# XMP sidecar writer shells out to the `exiftool` system binary
+# (apt: libimage-exiftool-perl, brew: exiftool). No Python deps.
+xmp = []
+all = ["phototag[ram,clip,cluster,report,heic,raw,exif,geo,face,ui,xmp]"]
 
 [dependency-groups]
 dev = [

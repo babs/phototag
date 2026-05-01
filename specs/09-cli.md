@@ -58,8 +58,8 @@ phototag rename-bulk JSON_PATH
 ## v2 — productivity
 
 ```
-phototag xmp write PATH [--modified] [--xmp-threshold 0.7]
-phototag xmp clean PATH
+phototag xmp write PATH [--threshold 0.7] [--include-people] [--apply]
+phototag xmp clean PATH [--apply]
 
 phototag category add NAME
 phototag category map --tag T   --category C

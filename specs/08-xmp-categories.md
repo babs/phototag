@@ -41,12 +41,21 @@ Example:
 `exiftool` subprocess by default — most reliable, handles all formats. `pyexiv2` as fallback. Always write sidecar (`.xmp`), never modify the original (preserves bit-exact archives).
 
 ```
-phototag xmp write ~/Photos              # write all
-phototag xmp write ~/Photos --modified   # only since last write
-phototag xmp clean ~/Photos              # remove sidecars
+phototag xmp write PATH [--threshold 0.7] [--include-people] [--apply]
+phototag xmp clean PATH [--apply]
 ```
 
-Write only tags above threshold (default 0.68, configurable via `--xmp-threshold`). Don't pollute keywords with low-confidence noise.
+Write only tags above threshold (default 0.7, configurable via `--threshold`). `--include-people` also adds the `label_user` of every `user_verified=1` face on the image as a keyword. Don't pollute keywords with low-confidence noise.
+
+**Status — XMP write portion: shipped (#22).** `phototag/xmp.py` shells
+out to `exiftool` (system binary; no Python dep). Default is dry-run;
+`--apply` actually writes. Skips images whose sidecar mtime is newer
+than the source AND whose `dc:Subject` set already matches what we
+would write (mtime + content check, per the idempotence contract
+below). Sidecars are written atomically via `<sidecar>.tmp.<token>` →
+`os.replace`. The `lr:HierarchicalSubject` field stays empty until
+**#23 (categories + tag/cluster mapping)** lands — see the "User
+categories" section below.
 
 ## User categories
 
