@@ -8,6 +8,8 @@ const state = {
   activeTags: new Set(),
   activePersons: new Set(),
   lightboxOpen: false,
+  facesVisible: true,
+  tagsVisible: false,
   // current set of images in the workspace, used by the lightbox for navigation.
   viewIds: [],
   viewIndex: 0,
@@ -188,9 +190,14 @@ async function showCurrentLightbox() {
     facesActions.push(`<a href="#" id="info-toggle-faces" onclick="event.preventDefault(); toggleFaceOverlays();" style="color:#9cf; opacity:${op};">faces (F)</a>`);
     facesActions.push(`<a href="#" onclick="event.preventDefault(); deleteAllFacesOnImage(${id});" style="color:#fca5a5;">drop ${faces.length} faces</a>`);
   }
+  if (info.tags && info.tags.length > 0) {
+    const op = state.tagsVisible ? '1' : '0.5';
+    facesActions.push(`<a href="#" id="info-toggle-tags" onclick="event.preventDefault(); toggleTagsCloud();" style="color:#9cf; opacity:${op};">tags (T) · ${info.tags.length}</a>`);
+  }
   facesActions.push(`<a href="#" onclick="event.preventDefault(); redetectFaces(${id});" style="color:#9cf;">re-detect faces</a>`);
   const facesActionStr = facesActions.length ? ' · ' + facesActions.join(' · ') : '';
-  $('lightbox-info').innerHTML = `<div>${escape(info.path)} · <a href="${assetUrl('raw', id)}" target="_blank" style="color:#9cf;">open original</a>${facesActionStr}</div>${formatExif(info.exif)}<div class="tags" style="margin-top:6px;">${tagHtml}</div>`;
+  const tagsBlock = `<div class="tags" id="info-tags" style="margin-top:6px; display:${state.tagsVisible ? 'flex' : 'none'};">${tagHtml}</div>`;
+  $('lightbox-info').innerHTML = `<div>${escape(info.path)} · <a href="${assetUrl('raw', id)}" target="_blank" style="color:#9cf;">open original</a>${facesActionStr}</div>${formatExif(info.exif)}${tagsBlock}`;
   state.lightboxFaces = faces;
   state.lightboxImage = info;
   // Render now if the image is already decoded; otherwise wait for it. Use
@@ -296,7 +303,6 @@ function closeLightbox() {
 
 state.lightboxFaces = [];
 state.lightboxImage = null;
-state.facesVisible = true;
 
 function renderFaceOverlays() {
   const img = $('lightbox-img');
@@ -340,6 +346,14 @@ function toggleFaceOverlays() {
   const btn = document.getElementById('info-toggle-faces');
   if (btn) btn.style.opacity = state.facesVisible ? '1' : '0.5';
   renderFaceOverlays();
+}
+
+function toggleTagsCloud() {
+  state.tagsVisible = !state.tagsVisible;
+  const tagsDiv = document.getElementById('info-tags');
+  if (tagsDiv) tagsDiv.style.display = state.tagsVisible ? 'flex' : 'none';
+  const btn = document.getElementById('info-toggle-tags');
+  if (btn) btn.style.opacity = state.tagsVisible ? '1' : '0.5';
 }
 
 async function onFaceClicked(face, clickX, clickY) {
@@ -701,6 +715,7 @@ document.addEventListener('keydown', (e) => {
 
   // Lightbox shortcuts (form not open).
   if (e.key === 'f' || e.key === 'F') { e.preventDefault(); toggleFaceOverlays(); }
+  else if (e.key === 't' || e.key === 'T') { e.preventDefault(); toggleTagsCloud(); }
   else if (e.key === 'ArrowLeft' || e.key === 'PageUp' || e.key === 'k') { e.preventDefault(); navLightbox(-1); }
   else if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === 'j' || e.key === ' ') { e.preventDefault(); navLightbox(1); }
 });
