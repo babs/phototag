@@ -187,12 +187,12 @@ async function showCurrentLightbox() {
   const facesActions = [];
   if (faces && faces.length > 0) {
     const op = state.facesVisible ? '1' : '0.5';
-    facesActions.push(`<a href="#" id="info-toggle-faces" onclick="event.preventDefault(); toggleFaceOverlays();" style="color:#9cf; opacity:${op};">faces (F)</a>`);
-    facesActions.push(`<a href="#" onclick="event.preventDefault(); deleteAllFacesOnImage(${id});" style="color:#fca5a5;">drop ${faces.length} faces</a>`);
+    facesActions.push(`<a href="#" id="info-toggle-faces" onclick="event.preventDefault(); toggleFaceOverlays();" style="color:#9cf; opacity:${op};">${faces.length} (F)aces</a>`);
+    facesActions.push(`<a href="#" onclick="event.preventDefault(); deleteAllFacesOnImage(${id});" style="color:#fca5a5;">drop ${faces.length}</a>`);
   }
   if (info.tags && info.tags.length > 0) {
     const op = state.tagsVisible ? '1' : '0.5';
-    facesActions.push(`<a href="#" id="info-toggle-tags" onclick="event.preventDefault(); toggleTagsCloud();" style="color:#9cf; opacity:${op};">tags (T) · ${info.tags.length}</a>`);
+    facesActions.push(`<a href="#" id="info-toggle-tags" onclick="event.preventDefault(); toggleTagsCloud();" style="color:#9cf; opacity:${op};">${info.tags.length} (T)ags</a>`);
   }
   facesActions.push(`<a href="#" onclick="event.preventDefault(); redetectFaces(${id});" style="color:#9cf;">re-detect faces</a>`);
   const facesActionStr = facesActions.length ? ' · ' + facesActions.join(' · ') : '';

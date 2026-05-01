@@ -24,17 +24,33 @@ For every photo in the library, find faces and group them by identity so the use
 ## Schema additions
 
 ```sql
--- v2
+-- v4: faces (one row per detected face)
 CREATE TABLE faces (
     id           INTEGER PRIMARY KEY,
     image_id     INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
-    bbox_json    TEXT NOT NULL,            -- [x, y, w, h] in original-pixel coords
+    bbox_json    TEXT NOT NULL,            -- [x, y, w, h] in DETECT_MAX_SIDE coords
     det_score    REAL NOT NULL,            -- detector confidence
-    embedding    BLOB NOT NULL,            -- float32 packed
+    embedding    BLOB NOT NULL,            -- float32 packed (512-dim ArcFace)
     dim          INTEGER NOT NULL,
     model_name   TEXT NOT NULL,            -- e.g. "insightface_buffalo_l_v1"
     landmarks_json TEXT                    -- 5 keypoints [[x,y]*5], optional
 );
+-- v5
+ALTER TABLE faces ADD COLUMN verified INTEGER;
+-- v6: audit trail of every user-driven face correction. No FK on
+-- face_id/image_id so the row survives even when the underlying face
+-- is deleted (the audit trail is the whole point).
+CREATE TABLE face_corrections (
+    id          INTEGER PRIMARY KEY,
+    face_id     INTEGER,
+    image_id    INTEGER,
+    action      TEXT NOT NULL,             -- 'named' | 'unassigned' | 'deleted'
+    cluster_id  INTEGER,                   -- old cluster on 'unassigned' / 'named'
+    name        TEXT,                      -- new label on 'named'
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX idx_face_corrections_face   ON face_corrections(face_id);
+CREATE INDEX idx_face_corrections_action ON face_corrections(action);
 CREATE INDEX IF NOT EXISTS idx_faces_image ON faces(image_id);
 
 CREATE TABLE face_runs (
@@ -77,11 +93,11 @@ CREATE TABLE face_identities (
 ### Detect + embed
 
 ```
-phototag faces detect [--gpu] [--limit N]
+phototag faces detect [--i-understand] [--limit N]
 ```
 
 For each image without a face row:
-1. Decode → BGR.
+1. Decode → EXIF-transposed → BGR → resize to `DETECT_MAX_SIDE` (1280 px max side). Bboxes are stored in this coord space — same as the lightbox preview, so the overlay JS can use them directly without rescaling.
 2. RetinaFace pass: list of `(bbox, det_score, landmarks)`.
 3. For each face: align via 5-point landmarks, ArcFace embedding (L2-normalized).
 4. Persist all faces in one transaction per image.
@@ -89,6 +105,21 @@ For each image without a face row:
 Idempotent: skip if `faces` table already has rows for the image and the model name matches.
 
 Decode is reusable from `pipeline._open_image`; the existing prefetch queue applies.
+
+### Verify (heuristic)
+
+```
+phototag faces verify [--min-score 0.65] [--min-area 1024] [--apply]
+```
+
+Walks every face row and applies two cheap filters: `det_score < min_score`
+and bbox area `< min_area` (in the DETECT_MAX_SIDE coord space). Without
+`--apply` it just sets `faces.verified` to 1 (passed) or 0 (suspect),
+which the UI renders as a dashed red border on the overlay. With
+`--apply` the failing rows are deleted (cluster sizes auto-adjusted).
+On the live corpus this trimmed ~33 % of detections (980 / 3013) — most
+of them tiny side-of-frame fragments and low-confidence cars-mistaken-
+for-faces.
 
 ### Cluster
 
@@ -186,15 +217,19 @@ A new sidebar tab next to "clusters" called **people** lists face clusters by si
 When a single image is open in the lightbox:
 - Fetch `/api/images/{id}/faces`.
 - For each face, render an absolutely-positioned `<div>` overlay matching the bbox, scaled to the displayed image size.
-- Reliability: layout/load races mean `clientWidth` can be 0 or `load` may not fire on cached images. The render is driven by a single `ResizeObserver` on the `<img>` plus a `decode()` race; whichever resolves first triggers the render, both gated by `lightboxToken` to drop stale paints during navigation.
+- Reliability: layout/load races mean `clientWidth` can be 0 or `load` may not fire on cached images. The render is driven by a single `ResizeObserver` on the `<img>` plus a `decode()` race plus a `requestAnimationFrame` fallback; whichever resolves first triggers the render, all gated by a `lightboxToken` so stale paints from the previous image are dropped during fast navigation. The observer reads the *live* token (not a captured stale one — that was a regression).
 - Style: 2 px border in a stable per-cluster colour (hash cluster_id → hue), name floating below the box. **Suspect** detections (verified=0 or det_score < 0.65) get a dashed red border instead.
-- Clicking any face opens a small popover:
-  - **save**: name the cluster (or the face directly via `/api/faces/{id}/name` when no cluster run exists); refreshes the overlay.
-  - **view 👤 *Name***: jump the lightbox to the merged person view for that name.
-  - **wrong**: drop the face's cluster assignment (logs a `face_corrections` row with the old `cluster_id`).
-  - **delete**: drop the face row (logs a `deleted` correction).
-- Lightbox info bar shows aggregate actions: **drop N faces** (one click for crowd shots) and **re-detect faces** (re-runs RetinaFace+ArcFace on this image only).
-- Toggle overlay visibility with **F** key or the toolbar button; default on.
+- Clicking any face opens a two-row popover:
+  - **row 1**: name input + **save** (Enter)
+  - **row 2**: **view (V)**, **wrong (W)**, **delete (D)**, **close (Esc)**. View/Wrong are conditionally hidden when not applicable.
+  - Keyboard shortcuts: V / W / D fire the matching button when the input isn't focused; Esc closes; Enter saves. The lightbox's own ←/→/F/T are suppressed while the form is open.
+  - **save** behaviour: if the face is in a cluster, renames *that* cluster (label_user); if not, creates a "manual" face_run + cluster keyed by the new name (so identity propagates on the next `phototag faces cluster`).
+- Lightbox info bar holds the secondary toggles and aggregate actions:
+  - `faces (F)` — toggle overlay visibility (default on)
+  - `drop N faces` — one-click for crowd shots
+  - `tags (T) · N` — toggle the chip cloud (default off; user expands when they want to filter from the photo)
+  - `re-detect faces` — re-runs RetinaFace+ArcFace on just this image
+- The image bar / lightbox itself uses ←/→/PageUp/PageDown/j/k/Space for navigation; F and T for the overlays; the ✕ at top-right or click-on-backdrop for close.
 
 ### Visual
 
