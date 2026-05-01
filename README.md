@@ -108,6 +108,14 @@ Live status table: [`specs/16-improvement-plan.md`](specs/16-improvement-plan.md
   face_id.
 - `phototag faces clear-noise-labels` — recovery for a historic bug
   where naming the noise cluster mass-tagged its members.
+- `phototag xmp write PATH [--apply] [--include-people]` — write
+  `<image>.xmp` sidecars (Dublin Core `dc:Subject`) so digiKam,
+  Lightroom, darktable, Capture One can read the tags. Idempotent.
+  Requires the `exiftool` system binary
+  (`apt install libimage-exiftool-perl` / `brew install exiftool`).
+  Example: `uv run phototag xmp write ./data/photo-corpus --apply --include-people`.
+- `phototag xmp clean PATH [--apply]` — remove every sidecar under
+  PATH (default dry-run).
 
 ## Install
 

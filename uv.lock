@@ -1344,7 +1344,7 @@ requires-dist = [
     { name = "onnxruntime", marker = "extra == 'face'", specifier = ">=1.18" },
     { name = "open-clip-torch", marker = "extra == 'clip'", specifier = ">=2.24" },
     { name = "opencv-python-headless", marker = "extra == 'face'", specifier = ">=4.8" },
-    { name = "phototag", extras = ["ram", "clip", "cluster", "report", "heic", "raw", "exif", "geo", "face", "ui"], marker = "extra == 'all'" },
+    { name = "phototag", extras = ["ram", "clip", "cluster", "report", "heic", "raw", "exif", "geo", "face", "ui", "xmp"], marker = "extra == 'all'" },
     { name = "piexif", marker = "extra == 'exif'", specifier = ">=1.1" },
     { name = "pillow", specifier = ">=10" },
     { name = "pillow-heif", marker = "extra == 'heic'", specifier = ">=0.16" },
@@ -1368,7 +1368,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'ui'", specifier = ">=0.32" },
     { name = "xxhash", specifier = ">=3.4" },
 ]
-provides-extras = ["ram", "clip", "cluster", "report", "heic", "raw", "exif", "geo", "face", "ui", "all"]
+provides-extras = ["ram", "clip", "cluster", "report", "heic", "raw", "exif", "geo", "face", "ui", "xmp", "all"]
 
 [package.metadata.requires-dev]
 dev = [

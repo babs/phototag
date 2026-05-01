@@ -1098,5 +1098,147 @@ def faces_stats() -> None:
         store.close()
 
 
+xmp_app = typer.Typer(help="Write/clean XMP sidecars (digiKam, Lightroom, darktable interop).")
+app.add_typer(xmp_app, name="xmp")
+
+
+def _collect_image_plans(
+    path: Path,
+    store: Store,
+    *,
+    threshold: float,
+    include_people: bool,
+) -> list[dict[str, Any]]:
+    """Walk `path`, intersect with the DB, build per-image keyword plans.
+
+    Returns one dict per image with `path`, `image_id`, `subjects`,
+    `hierarchical`. `hierarchical` is empty until #23 (categories)
+    lands — see specs/08-xmp-categories.md.
+    """
+    from .scanner import iter_images
+
+    plans: list[dict[str, Any]] = []
+    for scanned in iter_images(path):
+        image_row = store.get_image_by_path(str(scanned.path))
+        if image_row is None:
+            continue
+        tag_names = [name for name, _score in store.list_image_tags(image_row.id, min_score=threshold)]
+        people: list[str] = []
+        if include_people:
+            for face in store.list_faces_for_image(image_row.id):
+                if not face.get("user_verified"):
+                    continue
+                label = face.get("label_user")
+                if label:
+                    people.append(str(label))
+        subjects = sorted(set(tag_names) | set(people))
+        # TODO(#23): populate `hierarchical` from `tag_category_map` once
+        # the categories schema + apply step ship.
+        plans.append(
+            {
+                "path": str(scanned.path),
+                "image_id": image_row.id,
+                "subjects": subjects,
+                "hierarchical": [],
+            }
+        )
+    return plans
+
+
+@xmp_app.command("write")
+def xmp_write(
+    path: Annotated[Path, typer.Argument(help="Folder to walk recursively")],
+    threshold: Annotated[float, typer.Option(help="Min tag score to include")] = 0.7,
+    include_people: Annotated[
+        bool, typer.Option("--include-people", help="Include validated face labels as keywords")
+    ] = False,
+    apply: Annotated[bool, typer.Option(help="actually write sidecars; otherwise dry-run")] = False,
+) -> None:
+    """Write XMP sidecars (`<image>.xmp`) for every image under PATH.
+
+    Default is a dry-run that prints the per-image plan as JSON. `--apply`
+    actually invokes exiftool. Skips images whose sidecar is already up to
+    date with the DB-derived keyword set.
+
+    Requires `exiftool` on PATH (apt: libimage-exiftool-perl, brew: exiftool).
+    """
+    from .xmp import write_sidecar
+
+    settings = load_settings()
+    log = get_logger("phototag.xmp.write")
+    store = Store(settings.db_path)
+    counts = {"considered": 0, "written": 0, "skipped": 0, "failed": 0}
+    failures: list[dict[str, str]] = []
+    try:
+        plans = _collect_image_plans(path, store, threshold=threshold, include_people=include_people)
+        counts["considered"] = len(plans)
+        if not apply:
+            payload: dict[str, Any] = {
+                **counts,
+                "dry_run": True,
+                "plans": plans[:50],
+                "hint": f"dry-run; pass --apply to write {len(plans)} sidecar(s)",
+            }
+            log.info("xmp_write_planned", **counts)
+            typer.echo(json.dumps(payload, indent=2))
+            return
+        for plan in plans:
+            image_path = Path(plan["path"])
+            try:
+                _sidecar, written = write_sidecar(
+                    image_path,
+                    dc_subject=plan["subjects"],
+                    lr_hierarchical=plan["hierarchical"] or None,
+                )
+                if written:
+                    counts["written"] += 1
+                else:
+                    counts["skipped"] += 1
+            except Exception as exc:
+                counts["failed"] += 1
+                failures.append({"path": str(image_path), "error": str(exc)})
+                log.warning("xmp_write_failed", path=str(image_path), error=str(exc))
+        log.info("xmp_write_done", apply=True, **counts)
+        typer.echo(
+            json.dumps(
+                {**counts, "dry_run": False, "failures": failures[:20]},
+                indent=2,
+            )
+        )
+    finally:
+        store.close()
+
+
+@xmp_app.command("clean")
+def xmp_clean(
+    path: Annotated[Path, typer.Argument(help="Folder to walk recursively")],
+    apply: Annotated[bool, typer.Option(help="actually delete sidecars; otherwise dry-run")] = False,
+) -> None:
+    """Remove every `<image>.xmp` sidecar under PATH.
+
+    Default is a dry-run that lists what would be removed.
+    """
+    from .scanner import iter_images
+    from .xmp import clean_sidecar, sidecar_path
+
+    log = get_logger("phototag.xmp.clean")
+    counts = {"considered": 0, "removed": 0}
+    candidates: list[str] = []
+    for scanned in iter_images(path):
+        sidecar = sidecar_path(scanned.path)
+        if not sidecar.exists():
+            continue
+        counts["considered"] += 1
+        candidates.append(str(sidecar))
+        if apply:
+            if clean_sidecar(scanned.path):
+                counts["removed"] += 1
+    payload: dict[str, Any] = {**counts, "dry_run": not apply, "sidecars": candidates[:50]}
+    if not apply and counts["considered"]:
+        payload["hint"] = f"dry-run; pass --apply to remove {counts['considered']} sidecar(s)"
+    log.info("xmp_clean_done", apply=apply, **counts)
+    typer.echo(json.dumps(payload, indent=2))
+
+
 if __name__ == "__main__":
     app()
