@@ -809,31 +809,22 @@
     state.viewIds = flatIds;
   }
   async function viewPerson(clusterId, name) {
-    let ids = [];
-    const seen = /* @__PURE__ */ new Set();
+    state.view = "faces";
+    document.querySelectorAll(".view-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.view === "faces");
+    });
+    if ($("cluster-pane-title").textContent !== "people") await showFacesPanel();
     if (name) {
-      const data = await api(`/api/people/by-name/${encodeURIComponent(name)}?limit=500`);
-      for (const grp of data.groups) {
-        for (const m of grp.members) {
-          if (!seen.has(m.image_id)) {
-            seen.add(m.image_id);
-            ids.push(m.image_id);
-          }
-        }
-      }
+      await showPersonByName(name);
+    } else if (clusterId != null) {
+      await showPersonInWorkspace(clusterId);
     } else {
-      const data = await api(`/api/people/${clusterId}?limit=500`);
-      for (const m of data.members) {
-        if (!seen.has(m.image_id)) {
-          seen.add(m.image_id);
-          ids.push(m.image_id);
-        }
-      }
+      return;
     }
-    if (!ids.length) return;
-    state.viewIds = ids;
+    if (!state.viewIds.length) return;
     state.viewIndex = 0;
-    showCurrentLightbox();
+    await showCurrentLightbox();
+    writeHashRef2();
   }
   async function showUnidentifiedInWorkspace() {
     const ws = $("workspace");

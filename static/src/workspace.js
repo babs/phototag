@@ -103,29 +103,31 @@ export async function runSearch() {
 }
 
 // ---- viewPerson — used by the lightbox face popover G hotkey ------------
-// Pull all photos containing that person; replace the current view with them.
-// If `name` is supplied, walk every cluster sharing the same label_user so
-// the lightbox includes age-band siblings too.
+// Switch the underlying workspace to the person's view (faces panel +
+// sidebar selection + grid + URL hash) and re-anchor the open lightbox at
+// the first photo. Earlier versions only swapped `state.viewIds` inline,
+// which left the workspace, sidebar, and hash stale — closing the lightbox
+// dropped the user back on the previous view, mismatched.
 export async function viewPerson(clusterId, name) {
-  let ids = [];
-  const seen = new Set();
+  state.view = 'faces';
+  document.querySelectorAll('.view-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === 'faces');
+  });
+  if ($('cluster-pane-title').textContent !== 'people') await showFacesPanel();
   if (name) {
-    const data = await api(`/api/people/by-name/${encodeURIComponent(name)}?limit=500`);
-    for (const grp of data.groups) {
-      for (const m of grp.members) {
-        if (!seen.has(m.image_id)) { seen.add(m.image_id); ids.push(m.image_id); }
-      }
-    }
+    await showPersonByName(name);
+  } else if (clusterId != null) {
+    await showPersonInWorkspace(clusterId);
   } else {
-    const data = await api(`/api/people/${clusterId}?limit=500`);
-    for (const m of data.members) {
-      if (!seen.has(m.image_id)) { seen.add(m.image_id); ids.push(m.image_id); }
-    }
+    return;
   }
-  if (!ids.length) return;
-  state.viewIds = ids;
+  if (!state.viewIds.length) return;
   state.viewIndex = 0;
-  showCurrentLightbox();
+  await showCurrentLightbox();
+  // Update the `image=` segment of the hash now that the lightbox points
+  // at the first photo of the new person; showPerson*() already wrote
+  // run/view/who-or-face, but did so before viewIndex moved.
+  writeHashRef();
 }
 
 // ---- noise / orphan workspace -------------------------------------------
