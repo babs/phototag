@@ -45,6 +45,10 @@ class RenameRequest(BaseModel):
     label_user: str | None
 
 
+class FaceNameRequest(BaseModel):
+    name: str | None
+
+
 def _store(app: FastAPI) -> Store:
     s = getattr(app.state, "store", None)
     if s is None:
@@ -505,9 +509,6 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             "color": _face_color(cluster_id),
             "members": members,
         }
-
-    class FaceNameRequest(BaseModel):
-        name: str | None
 
     @app.post("/api/people/{cluster_id}/name")
     def api_person_rename(cluster_id: int, body: FaceNameRequest) -> dict[str, Any]:

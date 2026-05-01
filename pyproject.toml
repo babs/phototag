@@ -65,6 +65,7 @@ all = ["phototag[ram,clip,cluster,report,heic,raw,exif,geo,face,ui]"]
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
+    "httpx>=0.28",
     "mypy>=1.13",
     "ruff>=0.8",
     "pre-commit>=4",
@@ -106,4 +107,24 @@ addopts = "-v --tb=short"
 markers = [
     "slow: tests requiring downloaded models or large fixtures",
     "e2e: end-to-end tests requiring external services",
+]
+
+[tool.coverage.run]
+source = ["phototag"]
+branch = true
+omit = [
+    "phototag/__init__.py",
+    "phototag/models/ram.py",  # heavy ML, lazy-imported, exercised via slow tests
+    "phototag/models/clip.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.\\s*$",
 ]

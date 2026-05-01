@@ -1,0 +1,228 @@
+"""Tests for face-related Store helpers."""
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import numpy as np
+
+from phototag.store import Store
+
+
+def _gfc(store: Store, cluster_id: int) -> dict[str, object]:
+    """Like store.get_face_cluster but asserts non-None for type checkers."""
+    row = store.get_face_cluster(cluster_id)
+    assert row is not None
+    return row
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _add_image(store: Store, *, path: str, hash_: str = "h") -> int:
+    return store.upsert_image(
+        path=path,
+        hash_=hash_,
+        mtime=1.0,
+        width=100,
+        height=100,
+        exif=None,
+        processed_at=_now(),
+    )
+
+
+def _add_face(
+    store: Store,
+    image_id: int,
+    *,
+    bbox: list[int] | None = None,
+    score: float = 0.9,
+    embedding: np.ndarray | None = None,
+) -> int:
+    return store.insert_face(
+        image_id=image_id,
+        bbox=bbox or [10, 10, 50, 50],
+        det_score=score,
+        embedding=embedding if embedding is not None else np.ones(512, dtype=np.float32),
+        model_name="test_model",
+    )
+
+
+def test_insert_and_list_face(tmp_db: Path) -> None:
+    store = Store(tmp_db)
+    try:
+        img = _add_image(store, path="/tmp/a.jpg")
+        face_id = _add_face(store, img)
+        assert store.has_faces(img, "test_model")
+        assert store.count_faces() == 1
+        rows = store.list_faces_for_image(img)
+        assert len(rows) == 1
+        assert rows[0]["id"] == face_id
+        assert rows[0]["bbox"] == [10, 10, 50, 50]
+        assert rows[0]["verified"] is None
+    finally:
+        store.close()
+
+
+def test_face_run_and_assignment(tmp_db: Path) -> None:
+    store = Store(tmp_db)
+    try:
+        img = _add_image(store, path="/tmp/a.jpg")
+        face_id = _add_face(store, img)
+        run = store.create_face_run({"manual": True}, _now())
+        cid = store.add_face_cluster(run_id=run, cluster_no=0, size=1, label_auto="x", label_user="Anne")
+        store.assign_face_to_cluster(face_id, cid, distance=0.0)
+
+        # Round-trip
+        rows = store.list_faces_for_image(img)
+        assert rows[0]["cluster_id"] == cid
+        assert rows[0]["label_user"] == "Anne"
+
+        people = store.list_named_people()
+        assert len(people) == 1
+        assert people[0]["name"] == "Anne"
+        assert people[0]["count"] == 1
+        assert people[0]["n_clusters"] == 1
+    finally:
+        store.close()
+
+
+def test_search_by_persons(tmp_db: Path) -> None:
+    store = Store(tmp_db)
+    try:
+        img1 = _add_image(store, path="/tmp/1.jpg", hash_="h1")
+        img2 = _add_image(store, path="/tmp/2.jpg", hash_="h2")
+        run = store.create_face_run({"manual": True}, _now())
+        anne_c = store.add_face_cluster(run_id=run, cluster_no=0, size=2, label_auto=None, label_user="Anne")
+        bob_c = store.add_face_cluster(run_id=run, cluster_no=1, size=1, label_auto=None, label_user="Bob")
+        f1 = _add_face(store, img1)
+        f2 = _add_face(store, img1, bbox=[0, 0, 60, 60])  # second face on img1
+        f3 = _add_face(store, img2)
+        store.assign_face_to_cluster(f1, anne_c, 0.0)
+        store.assign_face_to_cluster(f2, bob_c, 0.0)
+        store.assign_face_to_cluster(f3, anne_c, 0.0)
+
+        # Anne alone → both images
+        assert store.search_images_by_persons(["Anne"]) == {img1, img2}
+        # Anne AND Bob → only img1
+        assert store.search_images_by_persons(["Anne", "Bob"]) == {img1}
+        # Empty → empty set
+        assert store.search_images_by_persons([]) == set()
+    finally:
+        store.close()
+
+
+def test_rename_clusters_by_label(tmp_db: Path) -> None:
+    store = Store(tmp_db)
+    try:
+        run = store.create_face_run({"manual": True}, _now())
+        c1 = store.add_face_cluster(run_id=run, cluster_no=0, size=1, label_auto=None, label_user="X")
+        c2 = store.add_face_cluster(run_id=run, cluster_no=1, size=2, label_auto=None, label_user="X")
+        # Rename both
+        n = store.rename_clusters_by_label("X", "Y")
+        assert n == 2
+        assert _gfc(store, c1)["label_user"] == "Y"
+        assert _gfc(store, c2)["label_user"] == "Y"
+        # Clear
+        n = store.rename_clusters_by_label("Y", None)
+        assert n == 2
+        assert _gfc(store, c1)["label_user"] is None
+    finally:
+        store.close()
+
+
+def test_face_identity_upsert(tmp_db: Path) -> None:
+    store = Store(tmp_db)
+    try:
+        v1 = np.array([1.0, 0.0], dtype=np.float32)
+        store.upsert_face_identity("Anne", v1, n_samples=3)
+        ids = store.list_face_identities()
+        assert len(ids) == 1
+        assert ids[0]["name"] == "Anne"
+        assert ids[0]["n_samples"] == 3
+        np.testing.assert_array_equal(ids[0]["centroid"], v1)
+        # Update
+        v2 = np.array([0.0, 1.0], dtype=np.float32)
+        store.upsert_face_identity("Anne", v2, n_samples=5)
+        ids = store.list_face_identities()
+        assert ids[0]["n_samples"] == 5
+        np.testing.assert_array_equal(ids[0]["centroid"], v2)
+        store.delete_face_identity("Anne")
+        assert store.list_face_identities() == []
+    finally:
+        store.close()
+
+
+def test_delete_face_decrements_cluster_size(tmp_db: Path) -> None:
+    store = Store(tmp_db)
+    try:
+        img = _add_image(store, path="/tmp/a.jpg")
+        run = store.create_face_run({}, _now())
+        cid = store.add_face_cluster(run_id=run, cluster_no=0, size=2, label_auto=None)
+        f1 = _add_face(store, img)
+        f2 = _add_face(store, img, bbox=[20, 20, 40, 40])
+        store.assign_face_to_cluster(f1, cid, 0.0)
+        store.assign_face_to_cluster(f2, cid, 0.0)
+        # Pre: cluster size = 2
+        assert _gfc(store, cid)["size"] == 2
+        store.delete_face(f1)
+        assert store.count_faces() == 1
+        # Cluster size decremented
+        assert _gfc(store, cid)["size"] == 1
+    finally:
+        store.close()
+
+
+def test_cluster_centroid(tmp_db: Path) -> None:
+    store = Store(tmp_db)
+    try:
+        img = _add_image(store, path="/tmp/a.jpg")
+        run = store.create_face_run({}, _now())
+        cid = store.add_face_cluster(run_id=run, cluster_no=0, size=2, label_auto=None)
+        v1 = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        v2 = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        f1 = store.insert_face(image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=v1, model_name="m")
+        f2 = store.insert_face(image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=v2, model_name="m")
+        store.assign_face_to_cluster(f1, cid, 0.0)
+        store.assign_face_to_cluster(f2, cid, 0.0)
+        c = store.cluster_centroid(cid)
+        assert c is not None
+        np.testing.assert_allclose(c, [0.5, 0.5, 0.0])
+        # Empty cluster → None
+        empty_cid = store.add_face_cluster(run_id=run, cluster_no=1, size=0, label_auto=None)
+        assert store.cluster_centroid(empty_cid) is None
+    finally:
+        store.close()
+
+
+def test_unassign_face_from_run(tmp_db: Path) -> None:
+    store = Store(tmp_db)
+    try:
+        img = _add_image(store, path="/tmp/a.jpg")
+        run = store.create_face_run({}, _now())
+        cid = store.add_face_cluster(run_id=run, cluster_no=0, size=1, label_auto=None)
+        f1 = _add_face(store, img)
+        store.assign_face_to_cluster(f1, cid, 0.0)
+        n = store.unassign_face_from_run(f1, run)
+        assert n == 1
+        rows = store.list_faces_for_image(img)
+        assert rows[0]["cluster_id"] is None
+        # Cluster size decremented
+        assert _gfc(store, cid)["size"] == 0
+    finally:
+        store.close()
+
+
+def test_purge_faces(tmp_db: Path) -> None:
+    store = Store(tmp_db)
+    try:
+        img = _add_image(store, path="/tmp/a.jpg")
+        _add_face(store, img)
+        store.upsert_face_identity("Anne", np.ones(2, dtype=np.float32), 1)
+        store.purge_faces(keep_identities=True)
+        assert store.count_faces() == 0
+        assert len(store.list_face_identities()) == 1
+        store.purge_faces()
+        assert len(store.list_face_identities()) == 0
+    finally:
+        store.close()

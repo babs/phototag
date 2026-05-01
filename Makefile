@@ -12,6 +12,9 @@ lint:
 test:
 	uv run pytest
 
+test-cov:
+	uv run pytest --cov=phototag --cov-report=term-missing --cov-report=xml --cov-report=html
+
 test-slow:
 	uv run pytest -m slow
 

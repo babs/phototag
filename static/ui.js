@@ -190,9 +190,38 @@ async function showCurrentLightbox() {
   $('lightbox-info').innerHTML = `<div>${escape(info.path)} · <a href="${assetUrl('raw', id)}" target="_blank" style="color:#9cf;">open original</a>${facesActionStr}</div>${formatExif(info.exif)}<div class="tags" style="margin-top:6px;">${tagHtml}</div>`;
   state.lightboxFaces = faces;
   state.lightboxImage = info;
-  // Render once the displayed size is known.
-  if (img.complete && img.naturalWidth > 0) renderFaceOverlays();
-  else img.addEventListener('load', renderFaceOverlays, { once: true });
+  // Render now if the image is already decoded; otherwise wait for it. Use
+  // .decode() which resolves regardless of whether `load` fires (cached images
+  // sometimes skip the event). We also retry once on the next animation frame
+  // because clientWidth can be stale right after a swap.
+  scheduleFaceOverlayRender(myToken);
+}
+
+function scheduleFaceOverlayRender(token) {
+  const img = $('lightbox-img');
+  const tryRender = () => {
+    if (token !== lightboxToken) return;  // navigation moved on
+    if (img.naturalWidth > 0 && img.clientWidth > 0) {
+      renderFaceOverlays();
+    } else {
+      // One more frame; covers the moment between src= and layout.
+      requestAnimationFrame(() => {
+        if (token !== lightboxToken) return;
+        renderFaceOverlays();
+      });
+    }
+  };
+  if (img.complete && img.naturalWidth > 0) {
+    tryRender();
+    return;
+  }
+  // Prefer .decode() over the load event — it resolves for cached images too.
+  if (img.decode) {
+    img.decode().then(tryRender, tryRender);
+  } else {
+    img.addEventListener('load', tryRender, { once: true });
+    img.addEventListener('error', tryRender, { once: true });
+  }
 }
 
 function formatExif(exif) {
