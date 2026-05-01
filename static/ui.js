@@ -1317,40 +1317,44 @@ async function showFacesPanel() {
     ]);
   } catch (e) { /* faces feature absent */ }
   root.innerHTML = '';
+  // Pinned workflow entries (orphan + triage). Resolved up-front so we can
+  // surface the triage count even on a fresh DB with no clusters yet.
+  let unidentCount = 0;
+  try {
+    const sm = await api('/api/faces/unidentified/summary');
+    unidentCount = sm.unidentified || 0;
+  } catch (e) { /* endpoint optional */ }
+  let triageCount = 0;
+  try {
+    const tr = await api('/api/faces/triage?limit=2000');
+    triageCount = tr.length;
+  } catch (e) { /* endpoint optional */ }
+  const addPinnedRow = (label, count, onclick) => {
+    const row = html(`<div class="cluster-row">
+      <div class="label"><span class="auto-label" style="font-style:italic;">${escape(label)}</span></div>
+      <div class="size">${count}</div>
+    </div>`);
+    row.addEventListener('click', onclick);
+    root.appendChild(row);
+  };
   if (!named.length && !unnamed.length) {
     // Even without any clusters yet, freshly-detected faces sit as orphans —
     // expose the qualify entry so the user can name them one by one.
-    let unidentCount = 0;
-    try {
-      const sm = await api('/api/faces/unidentified/summary');
-      unidentCount = sm.unidentified || 0;
-    } catch (e) { /* endpoint optional */ }
     if (unidentCount > 0) {
-      const orphanRow = html(`<div class="cluster-row" data-name="__unidentified__">
-        <div class="label"><span class="auto-label" style="font-style:italic;">noise / orphan (qualify)</span></div>
-        <div class="size">${unidentCount}</div>
-      </div>`);
-      orphanRow.onclick = () => showUnidentifiedInWorkspace();
-      root.appendChild(orphanRow);
+      addPinnedRow('noise / orphan (qualify)', unidentCount, () => showUnidentifiedInWorkspace());
+    }
+    if (triageCount > 0) {
+      addPinnedRow('triage queue', triageCount, () => showTriageInWorkspace());
     }
     root.appendChild(html(`<div class="empty" style="padding:12px;font-size:12px;">
       no face clusters yet. run <code>phototag faces cluster</code> after detection.
     </div>`));
   } else {
-    // Pin the noise/orphan entry to the TOP of the sidebar — it's the action
-    // the user comes here to perform. Always render it so the count is visible
-    // even when zero (lets the user confirm "no orphans left").
-    let unidentCount = 0;
-    try {
-      const sm = await api('/api/faces/unidentified/summary');
-      unidentCount = sm.unidentified || 0;
-    } catch (e) { /* endpoint optional */ }
-    const orphanRow = html(`<div class="cluster-row" data-name="__unidentified__">
-      <div class="label"><span class="auto-label" style="font-style:italic;">noise / orphan (qualify)</span></div>
-      <div class="size">${unidentCount}</div>
-    </div>`);
-    orphanRow.onclick = () => showUnidentifiedInWorkspace();
-    root.appendChild(orphanRow);
+    // Pin the noise/orphan + triage entries to the TOP of the sidebar — these
+    // are the actions the user comes here to perform. Always rendered so the
+    // counts stay visible even at zero (confirms "nothing left to do").
+    addPinnedRow('noise / orphan (qualify)', unidentCount, () => showUnidentifiedInWorkspace());
+    addPinnedRow('triage queue', triageCount, () => showTriageInWorkspace());
 
     named.forEach(p => {
       const cBadge = p.n_clusters > 1 ? ` <span class="count" style="opacity:0.7;">×${p.n_clusters}</span>` : '';
@@ -1431,6 +1435,42 @@ async function showUnidentifiedInWorkspace() {
     const tile = makeTile(it.id, it.path, null);
     const meta = tile.querySelector('.meta');
     meta.innerHTML = `<b>${it.face_count}</b> · ${meta.textContent}`;
+    grid.appendChild(tile);
+  });
+  ws.appendChild(grid);
+  state.viewIds = items.map(it => it.id);
+}
+
+async function showTriageInWorkspace() {
+  const ws = $('workspace');
+  ws.innerHTML = '<div class="empty">loading…</div>';
+  // Photos needing attention: ≥1 unverified named face, or a duplicate-name
+  // ⚠ on the overlay. Sorted server-side by score (dups weighted ×2).
+  const items = await api('/api/faces/triage?limit=2000');
+  ws.innerHTML = '';
+  ws.appendChild(html(`<h2>Triage queue</h2>`));
+  ws.appendChild(html(`<div class="auto">${items.length} photos · validate or fix the ⚠ duplicates · open one then walk with ←/→</div>`));
+  if (!items.length) {
+    ws.appendChild(html('<div class="empty">nothing to triage — every named face is verified and no duplicate names are left.</div>'));
+    state.viewIds = [];
+    return;
+  }
+  const grid = html('<div class="grid"></div>');
+  items.forEach(it => {
+    const tile = makeTile(it.id, it.path, null);
+    const meta = tile.querySelector('.meta');
+    // Compact badges: amber ⚠ for unverified count, red ⚠⚠ for duplicate-name
+    // groups (likely false positives, hence the heavier weight in the score).
+    const badges = [];
+    if (it.n_unverified > 0) {
+      badges.push(`<span style="color:#f59e0b;" title="${it.n_unverified} unverified named face${it.n_unverified === 1 ? '' : 's'}">⚠ ${it.n_unverified}</span>`);
+    }
+    if (it.n_dups > 0) {
+      badges.push(`<span style="color:#dc2626;" title="${it.n_dups} duplicate-name group${it.n_dups === 1 ? '' : 's'}">⚠⚠ ${it.n_dups}</span>`);
+    }
+    const hover = `score ${it.score} · ${it.n_unverified} unverified · ${it.n_dups} dups`;
+    meta.innerHTML = `${badges.join(' ')} · ${meta.textContent}`;
+    meta.title = hover;
     grid.appendChild(tile);
   });
   ws.appendChild(grid);

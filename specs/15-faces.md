@@ -202,6 +202,16 @@ GET    /api/faces/corrections                     → audit log: named /
 
 GET    /api/faces/unidentified/summary            → count of orphan/noise faces
 GET    /api/faces/unidentified/images             → photos containing ≥1 of them
+GET    /api/faces/triage?limit=300                → photos needing attention:
+                                                    ≥1 unverified named face
+                                                    OR a duplicate name (same
+                                                    label_user on ≥2 faces of
+                                                    the photo). Each row:
+                                                    {id, path, n_unverified,
+                                                    n_dups, score} with
+                                                    score = n_unverified
+                                                          + 2 * n_dups,
+                                                    sorted by score DESC.
 DELETE /api/faces/unidentified?yes=true           → library-wide drop
                                                     (yes=true required)
 POST   /api/faces/clear-noise-labels              → wipe label_user from any
