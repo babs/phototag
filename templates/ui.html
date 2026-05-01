@@ -90,6 +90,11 @@
   }
   .face-card .name { padding: 4px 6px; font-size: 12px; color: var(--accent); font-weight: 600; }
   .face-card.unnamed .name { color: var(--muted); font-weight: 400; font-style: italic; }
+  .pen-btn {
+    border: 0; background: transparent; cursor: pointer; font-size: 14px;
+    padding: 2px 6px; opacity: 0.5; vertical-align: middle;
+  }
+  .pen-btn:hover { opacity: 1; }
   /* face overlays in the lightbox */
   .face-layer { position: absolute; pointer-events: none; }
   .face-box {
@@ -216,6 +221,9 @@
 <div id="face-name-form" class="face-name-form" style="display:none;">
   <input id="face-name-input" type="text" placeholder="name this person…" autocomplete="off">
   <button id="face-name-save">save</button>
+  <button id="face-view-person" title="view this person's photos" style="display:none;">view</button>
+  <button id="face-wrong" title="this face was clustered with the wrong person" style="display:none;">wrong</button>
+  <button id="face-delete" title="not a face / delete row">delete</button>
   <button id="face-name-cancel">×</button>
 </div>
 <script>
@@ -224,8 +232,10 @@ const state = {
   runId: null,
   clusters: [],
   selectedCluster: null,
+  selectedFaceCluster: null,
   activeTags: new Set(),
   activePersons: new Set(),
+  lightboxOpen: false,
   // current set of images in the workspace, used by the lightbox for navigation.
   viewIds: [],
   viewIndex: 0,
@@ -316,14 +326,19 @@ async function showCluster(id) {
   ws.innerHTML = '<div class="empty">loading…</div>';
   const c = await api(`/api/clusters/${id}?limit=120`);
   ws.innerHTML = '';
-  ws.appendChild(html(`<h2>${c.label_user ? escape(c.label_user) : `cluster #${c.cluster_no}`}</h2>`));
+  ws.appendChild(html(`<h2>${c.label_user ? escape(c.label_user) : `cluster #${c.cluster_no}`} <button id="cluster-edit-toggle" class="pen-btn" title="edit label">✏️</button></h2>`));
   if (c.label_auto) ws.appendChild(html(`<div class="auto">auto: ${escape(c.label_auto)} · size ${c.size}</div>`));
-  // rename
-  const renameDiv = html(`<div class="rename">
+  // rename — hidden until pen clicked
+  const renameDiv = html(`<div class="rename" id="cluster-rename" style="display:none;">
     <input id="rename-input" type="text" placeholder="user label (blank to clear)" value="${escape(c.label_user || '')}">
     <button id="rename-btn">save</button>
   </div>`);
   ws.appendChild(renameDiv);
+  $('cluster-edit-toggle').onclick = () => {
+    const r = $('cluster-rename');
+    r.style.display = r.style.display === 'none' ? 'flex' : 'none';
+    if (r.style.display === 'flex') $('rename-input').focus();
+  };
   $('rename-btn').onclick = async () => {
     const v = $('rename-input').value.trim();
     await api(`/api/clusters/${id}/rename`, {
@@ -368,8 +383,10 @@ function openLightbox(image_id) {
   let idx = state.viewIds.indexOf(image_id);
   if (idx < 0) { state.viewIds = [image_id, ...state.viewIds]; idx = 0; }
   state.viewIndex = idx;
+  state.lightboxOpen = true;
   $('lightbox').classList.add('show');
   showCurrentLightbox();
+  writeHash();
 }
 
 let lightboxToken = 0;
@@ -444,11 +461,14 @@ function navLightbox(delta) {
   const n = state.viewIds.length;
   state.viewIndex = ((state.viewIndex + delta) % n + n) % n;
   showCurrentLightbox();
+  writeHash();
 }
 
 function closeLightbox() {
+  state.lightboxOpen = false;
   $('lightbox').classList.remove('show');
   closeFaceNameForm();
+  writeHash();
 }
 
 // ---- face overlays in the lightbox ---------------------------------------
@@ -502,11 +522,7 @@ function toggleFaceOverlays() {
 $('lightbox-toggle-faces').onclick = (e) => { e.stopPropagation(); toggleFaceOverlays(); };
 
 async function onFaceClicked(face, clickX, clickY) {
-  if (face.named && face.cluster_id != null) {
-    // Navigate the lightbox to this person's photos.
-    await viewPerson(face.cluster_id);
-    return;
-  }
+  // Always open the menu — gives access to wrong/delete even on named faces.
   openFaceNameForm(face, clickX, clickY);
 }
 
@@ -515,11 +531,17 @@ let pendingFace = null;
 function openFaceNameForm(face, x, y) {
   pendingFace = face;
   const form = $('face-name-form');
-  form.style.left = Math.min(window.innerWidth - 320, x) + 'px';
+  form.style.left = Math.min(window.innerWidth - 480, x) + 'px';
   form.style.top = Math.min(window.innerHeight - 60, y) + 'px';
   form.style.display = 'flex';
-  $('face-name-input').value = '';
+  $('face-name-input').value = face.label || '';
+  $('face-name-input').placeholder = face.named ? 'rename this cluster…' : 'name this person…';
+  // Toggle context-sensitive buttons.
+  $('face-view-person').style.display = (face.named && face.cluster_id != null) ? 'inline-block' : 'none';
+  if (face.named) $('face-view-person').textContent = `view 👤 ${face.label}`;
+  $('face-wrong').style.display = (face.cluster_id != null) ? 'inline-block' : 'none';
   $('face-name-input').focus();
+  $('face-name-input').select();
 }
 
 function closeFaceNameForm() {
@@ -551,6 +573,29 @@ async function saveFaceName() {
 
 $('face-name-save').onclick = saveFaceName;
 $('face-name-cancel').onclick = closeFaceNameForm;
+$('face-view-person').onclick = () => {
+  if (pendingFace?.cluster_id != null) viewPerson(pendingFace.cluster_id);
+  closeFaceNameForm();
+};
+$('face-wrong').onclick = async () => {
+  if (!pendingFace) return;
+  try {
+    await api(`/api/faces/${pendingFace.id}/unassign`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+    });
+  } catch (e) { alert('failed: ' + e.message); return; }
+  closeFaceNameForm();
+  showCurrentLightbox();
+};
+$('face-delete').onclick = async () => {
+  if (!pendingFace) return;
+  if (!confirm('Delete this face permanently? (use for false positives or non-faces)')) return;
+  try {
+    await api(`/api/faces/${pendingFace.id}`, { method: 'DELETE' });
+  } catch (e) { alert('failed: ' + e.message); return; }
+  closeFaceNameForm();
+  showCurrentLightbox();
+};
 $('face-name-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') saveFaceName();
   else if (e.key === 'Escape') closeFaceNameForm();
@@ -785,11 +830,14 @@ function parseHash() {
   const raw = (location.hash || '').replace(/^#/, '');
   const p = new URLSearchParams(raw);
   return {
+    view: p.get('view'),
     run: p.has('run') ? Number(p.get('run')) : null,
     cluster: p.has('cluster') ? Number(p.get('cluster')) : null,
+    face: p.has('face') ? Number(p.get('face')) : null,
     tags: p.getAll('tag'),
     persons: p.getAll('person'),
     minScore: p.has('score') ? parseFloat(p.get('score')) : null,
+    image: p.has('image') ? Number(p.get('image')) : null,
   };
 }
 
@@ -799,14 +847,20 @@ function writeHash() {
   if (hashWriteSuspended) return;
   const p = new URLSearchParams();
   if (state.runId != null) p.set('run', String(state.runId));
+  if (state.view && state.view !== 'clusters') p.set('view', state.view);
   // Filters (tags + persons) take precedence over a selected cluster.
   if (state.activeTags.size > 0 || state.activePersons.size > 0) {
     state.activePersons.forEach(n => p.append('person', n));
     state.activeTags.forEach(t => p.append('tag', t));
     const ms = parseFloat($('min-score').value || '0');
     if (ms > 0 && state.activeTags.size > 0) p.set('score', ms.toFixed(2));
+  } else if (state.view === 'faces' && state.selectedFaceCluster != null) {
+    p.set('face', String(state.selectedFaceCluster));
   } else if (state.selectedCluster != null) {
     p.set('cluster', String(state.selectedCluster));
+  }
+  if (state.lightboxOpen && state.viewIds.length) {
+    p.set('image', String(state.viewIds[state.viewIndex]));
   }
   const next = '#' + p.toString();
   if (location.hash !== next) history.replaceState(null, '', next || location.pathname);
@@ -816,16 +870,38 @@ async function applyHashState(h) {
   hashWriteSuspended = true;
   try {
     if (h.minScore != null && !Number.isNaN(h.minScore)) $('min-score').value = String(h.minScore);
+    if (h.view === 'faces') {
+      state.view = 'faces';
+      document.querySelectorAll('.view-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.view === 'faces');
+      });
+      await showFacesPanel();
+    }
     const hasFilter = (h.tags && h.tags.length) || (h.persons && h.persons.length);
     if (hasFilter) {
       state.activeTags = new Set(h.tags || []);
       state.activePersons = new Set(h.persons || []);
       renderActiveFilters();
       await runSearch();
+    } else if (h.face != null) {
+      state.view = 'faces';
+      document.querySelectorAll('.view-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.view === 'faces');
+      });
+      // Ensure people sidebar is rendered before selecting.
+      if ($('cluster-pane-title').textContent !== 'people') await showFacesPanel();
+      await showPersonInWorkspace(h.face);
     } else if (h.cluster != null) {
-      // Cluster row may not exist for the chosen run; fall back to no selection.
       const exists = state.clusters.some(c => c.id === h.cluster);
       if (exists) selectCluster(h.cluster);
+    }
+    // Re-open the lightbox if the hash had an image= entry. Suspended-write
+    // means openLightbox doesn't try to write a hash mid-restore.
+    if (h.image != null && state.viewIds.includes(h.image)) {
+      state.viewIndex = state.viewIds.indexOf(h.image);
+      state.lightboxOpen = true;
+      $('lightbox').classList.add('show');
+      showCurrentLightbox();
     }
   } finally {
     hashWriteSuspended = false;
@@ -948,6 +1024,8 @@ async function showFacesGrid() {
 }
 
 async function showPersonInWorkspace(clusterId) {
+  state.selectedFaceCluster = clusterId;
+  writeHash();
   const ws = $('workspace');
   ws.innerHTML = '<div class="empty">loading…</div>';
   const data = await api(`/api/people/${clusterId}?limit=500`);
@@ -962,15 +1040,20 @@ async function showPersonInWorkspace(clusterId) {
   ws.innerHTML = '';
   const titleText = data.label_user || data.label_auto || `person ${data.cluster_no}`;
   const titleSuffix = siblings.length > 1 ? ` <span style="font-size:12px;color:var(--muted);">(${siblings.length} clusters share this name)</span>` : '';
-  ws.appendChild(html(`<h2>${escape(titleText)}${titleSuffix}</h2>`));
+  ws.appendChild(html(`<h2>${escape(titleText)} <button id="person-edit-toggle" class="pen-btn" title="edit name">✏️</button>${titleSuffix}</h2>`));
 
-  // Inline rename for *this cluster only*.
-  const renameDiv = html(`<div class="rename" style="margin:6px 0 8px;">
+  // Inline rename for *this cluster only* — hidden until pen is clicked.
+  const renameDiv = html(`<div class="rename" id="person-rename" style="margin:6px 0 8px; display:none;">
     <input id="person-rename-input" type="text" placeholder="rename this cluster…" value="${escape(data.label_user || '')}">
     <button id="person-rename-save">save</button>
     <button id="person-rename-clear" title="unname this cluster">clear</button>
   </div>`);
   ws.appendChild(renameDiv);
+  $('person-edit-toggle').onclick = () => {
+    const r = $('person-rename');
+    r.style.display = r.style.display === 'none' ? 'flex' : 'none';
+    if (r.style.display === 'flex') $('person-rename-input').focus();
+  };
   $('person-rename-save').onclick = () => savePersonRename(clusterId, $('person-rename-input').value.trim());
   $('person-rename-clear').onclick = () => savePersonRename(clusterId, '');
   $('person-rename-input').addEventListener('keydown', (e) => {

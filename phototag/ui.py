@@ -235,6 +235,48 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         log.info("face_identity_rename_all", from_=name, to=new, clusters=n)
         return {"renamed": n, "from": name, "to": new}
 
+    @app.delete("/api/faces/{face_id}")
+    def api_delete_face(face_id: int) -> dict[str, Any]:
+        """Drop a false-positive face row."""
+        s = _store(app)
+        if s.get_face(face_id) is None:
+            raise HTTPException(status_code=404, detail="face not found")
+        with s.transaction():
+            s.delete_face(face_id)
+        log.info("face_deleted", face_id=face_id)
+        return {"deleted": face_id}
+
+    @app.post("/api/faces/{face_id}/unassign")
+    def api_unassign_face(face_id: int) -> dict[str, Any]:
+        """Remove this face's cluster assignment in the latest run.
+
+        Use case: face was clustered to the wrong person. The face row stays
+        so the next `phototag faces cluster` can re-place it.
+        """
+        s = _store(app)
+        if s.get_face(face_id) is None:
+            raise HTTPException(status_code=404, detail="face not found")
+        latest = s.latest_face_run()
+        with s.transaction():
+            if latest is None:
+                # No runs scoped — drop every assignment for this face.
+                rows = s.conn.execute(
+                    "SELECT cluster_id FROM face_cluster_assignments WHERE face_id=?",
+                    (face_id,),
+                ).fetchall()
+                cids = [int(r["cluster_id"]) for r in rows]
+                s.conn.execute("DELETE FROM face_cluster_assignments WHERE face_id=?", (face_id,))
+                for cid in cids:
+                    s.conn.execute(
+                        "UPDATE face_clusters SET size = MAX(0, size - 1) WHERE id=?",
+                        (cid,),
+                    )
+                removed = len(cids)
+            else:
+                removed = s.unassign_face_from_run(face_id, latest)
+        log.info("face_unassigned", face_id=face_id, removed=removed)
+        return {"unassigned": face_id, "removed": removed}
+
     @app.post("/api/people/by-name/{name}/split")
     def api_people_by_name_split(name: str) -> dict[str, Any]:
         """Suffix each cluster currently labelled `name` as `name 1`, `name 2`, …

@@ -741,6 +741,50 @@ class Store:
     def delete_face_identity(self, name: str) -> None:
         self.conn.execute("DELETE FROM face_identities WHERE name=?", (name,))
 
+    def delete_face(self, face_id: int) -> None:
+        """Drop the face row entirely. Cascades cluster_assignments."""
+        # Decrement cluster sizes first so display stays consistent.
+        rows = self.conn.execute(
+            "SELECT cluster_id FROM face_cluster_assignments WHERE face_id=?",
+            (face_id,),
+        ).fetchall()
+        for r in rows:
+            self.conn.execute(
+                "UPDATE face_clusters SET size = MAX(0, size - 1) WHERE id=?",
+                (r["cluster_id"],),
+            )
+        self.conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
+
+    def unassign_face_from_run(self, face_id: int, run_id: int) -> int:
+        """Remove this face's cluster assignment(s) within a single run.
+
+        Returns the count of removed rows.
+        """
+        # Look up cluster ids first to update sizes.
+        cur = self.conn.execute(
+            """
+            SELECT fc.id AS cluster_id
+            FROM face_cluster_assignments fca
+            JOIN face_clusters fc ON fc.id = fca.cluster_id
+            WHERE fca.face_id=? AND fc.run_id=?
+            """,
+            (face_id, run_id),
+        )
+        cids = [int(r["cluster_id"]) for r in cur]
+        if not cids:
+            return 0
+        placeholders = ",".join("?" * len(cids))
+        self.conn.execute(
+            f"DELETE FROM face_cluster_assignments WHERE face_id=? AND cluster_id IN ({placeholders})",
+            [face_id, *cids],
+        )
+        for cid in cids:
+            self.conn.execute(
+                "UPDATE face_clusters SET size = MAX(0, size - 1) WHERE id=?",
+                (cid,),
+            )
+        return len(cids)
+
     def search_images_by_persons(self, names: list[str]) -> set[int]:
         """Image ids containing a face in a cluster named for each of `names` (AND)."""
         if not names:
