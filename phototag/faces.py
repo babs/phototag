@@ -730,6 +730,12 @@ def attach_face_to_best_identity(
     emb = np.asarray(embedding, dtype=np.float32)
     edim = int(emb.shape[0])
 
+    # Tier-2 sticky labels (hard-negative mining): identities the user has
+    # explicitly rejected for *this* face via an `unassigned` correction.
+    # Skipping them here stops the loop from re-suggesting the same wrong
+    # name re-cluster after re-cluster.
+    cannot = store.cannot_link_identities_for_face(face_id)
+
     # Track top-2 so we can refuse to attach when the choice is ambiguous
     # (top1 - top2 < min_margin). On the live corpus we observed faces with
     # Brooke 0.581 vs Carla 0.577 — a 0.004 margin where deterministic
@@ -742,6 +748,8 @@ def attach_face_to_best_identity(
     best_n = 0
     for ident in identities:
         if int(ident.get("dim", 0)) != edim:
+            continue
+        if str(ident["name"]) in cannot:
             continue
         sim = _cosine_sim(emb, ident["centroid"])
         if sim > best_sim:
@@ -850,6 +858,7 @@ def auto_attach_orphans(
             "by_identity": {},
             "below_threshold": 0,
             "ambiguous": 0,
+            "cannot_link_skipped": 0,
             "dry_run": dry_run,
         }
     if limit is not None:
@@ -865,6 +874,7 @@ def auto_attach_orphans(
             "by_identity": {},
             "below_threshold": int(len(orphan_ids)),
             "ambiguous": 0,
+            "cannot_link_skipped": 0,
             "dry_run": dry_run,
         }
 
@@ -878,6 +888,7 @@ def auto_attach_orphans(
             "by_identity": {},
             "below_threshold": int(len(orphan_ids)),
             "ambiguous": 0,
+            "cannot_link_skipped": 0,
             "dry_run": dry_run,
         }
 
@@ -885,6 +896,27 @@ def auto_attach_orphans(
     on = _normalize_rows(orphan_mat)
     inn = _normalize_rows(ident_mat)
     sim = on @ inn.T  # (N_orphan, N_idents)
+
+    # Tier-2 sticky labels (hard-negative mining): bulk-load every
+    # cannot-link identity per orphan face from `face_corrections`, then
+    # mask the forbidden (face, identity) pairs to -inf so they cannot win
+    # the argmax and never count toward the top-2 margin check.
+    cannot_by_face = store.cannot_link_identities_for_faces([int(f) for f in orphan_ids])
+    cannot_link_skipped = 0
+    if cannot_by_face:
+        ident_names = [str(d["name"]) for d in same_dim]
+        forbid = np.zeros(sim.shape, dtype=bool)
+        for i, fid in enumerate(orphan_ids):
+            blocked = cannot_by_face.get(int(fid))
+            if not blocked:
+                continue
+            for j, name in enumerate(ident_names):
+                if name in blocked:
+                    forbid[i, j] = True
+        cannot_link_skipped = int(forbid.sum())
+        if cannot_link_skipped:
+            sim = np.where(forbid, -np.inf, sim)
+
     best_j = np.argmax(sim, axis=1)
     best_s = sim[np.arange(sim.shape[0]), best_j]
     # Top-2 sim per row for the ambiguity check (set best to -inf, then
@@ -937,6 +969,7 @@ def auto_attach_orphans(
             "auto_validated": auto_validated,
             "below_threshold": below,
             "ambiguous": ambiguous,
+            "cannot_link_skipped": cannot_link_skipped,
             "by_identity": by_identity,
             "dry_run": True,
         }
@@ -994,6 +1027,7 @@ def auto_attach_orphans(
         auto_validated=auto_validated,
         below_threshold=below,
         ambiguous=ambiguous,
+        cannot_link_skipped=cannot_link_skipped,
     )
     return {
         "n_orphan": int(len(orphan_ids)),
@@ -1001,6 +1035,7 @@ def auto_attach_orphans(
         "auto_validated": auto_validated,
         "below_threshold": below,
         "ambiguous": ambiguous,
+        "cannot_link_skipped": cannot_link_skipped,
         "by_identity": by_identity,
         "dry_run": False,
     }

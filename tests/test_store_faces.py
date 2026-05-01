@@ -452,6 +452,143 @@ def test_auto_attach_orphans_persist(tmp_db: Path) -> None:
         store.close()
 
 
+def test_cannot_link_identities_for_face_helper(tmp_db: Path) -> None:
+    """`unassigned` corrections referencing a labelled cluster contribute the
+    cluster's label_user to the per-face cannot-link set; NULL labels and
+    other actions are ignored."""
+    store = Store(tmp_db)
+    try:
+        img = _add_image(store, path="/tmp/a.jpg")
+        run = store.create_face_run({}, _now())
+        anne_c = store.add_face_cluster(run_id=run, cluster_no=0, size=1, label_auto=None, label_user="Anne")
+        unlabeled_c = store.add_face_cluster(
+            run_id=run, cluster_no=1, size=1, label_auto=None, label_user=None
+        )
+        bea_c = store.add_face_cluster(run_id=run, cluster_no=2, size=1, label_auto=None, label_user="Bea")
+        fid = _add_face(store, img)
+        # Rejected Anne (labelled) → joins cannot-link.
+        store.log_face_correction(face_id=fid, image_id=img, action="unassigned", cluster_id=anne_c)
+        # Rejected an unlabeled cluster → ignored.
+        store.log_face_correction(face_id=fid, image_id=img, action="unassigned", cluster_id=unlabeled_c)
+        # `named` Bea is not an unassign → ignored even though Bea has a label.
+        store.log_face_correction(face_id=fid, image_id=img, action="named", cluster_id=bea_c, name="Bea")
+        assert store.cannot_link_identities_for_face(fid) == {"Anne"}
+        # Bulk variant: face with no rows is absent from the dict.
+        bulk = store.cannot_link_identities_for_faces([fid, fid + 9999])
+        assert bulk == {fid: {"Anne"}}
+    finally:
+        store.close()
+
+
+def test_attach_skips_cannot_link_identity(tmp_db: Path) -> None:
+    """Per-face attach: an `unassigned` correction against Anne (rejected)
+    forces the helper to pick the next-best identity (Bea) even though
+    cosine ranks Anne higher."""
+    from phototag.faces import attach_face_to_best_identity
+
+    store = Store(tmp_db)
+    try:
+        # Two strong identities. The face embedding favors Anne.
+        store.upsert_face_identity("Anne", np.array([1.0, 0.0, 0.0], dtype=np.float32), n_samples=5)
+        store.upsert_face_identity("Bea", np.array([0.0, 1.0, 0.0], dtype=np.float32), n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+        # Embedding strongly Anne (cos≈0.9), weakly Bea (cos≈0.4).
+        emb = np.array([0.9, 0.4, 0.0], dtype=np.float32)
+        fid = store.insert_face(
+            image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=emb, model_name="m"
+        )
+        # Sanity: without the cannot-link, Anne wins.
+        baseline = attach_face_to_best_identity(store, fid, emb, image_id=img, min_margin=0.0)
+        assert baseline is not None and baseline["name"] == "Anne"
+
+        # Reset state for the cannot-link case: clear the manual cluster
+        # membership the previous attach created and seed the rejection.
+        store.unassign_face_globally(fid)
+        run = store.create_face_run({}, _now())
+        anne_old = store.add_face_cluster(
+            run_id=run, cluster_no=0, size=1, label_auto=None, label_user="Anne"
+        )
+        store.log_face_correction(face_id=fid, image_id=img, action="unassigned", cluster_id=anne_old)
+
+        # Anne is now in the cannot-link set → helper falls through to Bea.
+        # min_margin=0.0 so Bea (cos≈0.4 vs nothing else) clears the bar.
+        hit = attach_face_to_best_identity(store, fid, emb, image_id=img, threshold=0.3, min_margin=0.0)
+        assert hit is not None
+        assert hit["name"] == "Bea"
+    finally:
+        store.close()
+
+
+def test_attach_returns_none_when_only_identity_is_blocked(tmp_db: Path) -> None:
+    """When the only candidate identity is in the cannot-link set, the
+    helper returns None instead of attaching."""
+    from phototag.faces import attach_face_to_best_identity
+
+    store = Store(tmp_db)
+    try:
+        store.upsert_face_identity("Anne", np.array([1.0, 0.0, 0.0], dtype=np.float32), n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+        emb = np.array([0.99, 0.01, 0.0], dtype=np.float32)
+        fid = store.insert_face(
+            image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=emb, model_name="m"
+        )
+        run = store.create_face_run({}, _now())
+        anne_old = store.add_face_cluster(
+            run_id=run, cluster_no=0, size=1, label_auto=None, label_user="Anne"
+        )
+        store.log_face_correction(face_id=fid, image_id=img, action="unassigned", cluster_id=anne_old)
+        assert attach_face_to_best_identity(store, fid, emb, image_id=img) is None
+    finally:
+        store.close()
+
+
+def test_auto_attach_orphans_honours_cannot_link(tmp_db: Path) -> None:
+    """Bulk auto-attach: a per-face cannot-link blocks Anne; the orphan
+    falls through to Bea (or stays orphan if no fallback). The result dict
+    surfaces `cannot_link_skipped`."""
+    from phototag.faces import auto_attach_orphans
+
+    store = Store(tmp_db)
+    try:
+        store.upsert_face_identity("Anne", np.array([1.0, 0.0, 0.0], dtype=np.float32), n_samples=5)
+        store.upsert_face_identity("Bea", np.array([0.0, 1.0, 0.0], dtype=np.float32), n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+        # Two orphans. Both favor Anne but the second one falls back to Bea
+        # comfortably; one third strongly-Anne face is left untouched as a
+        # control to verify only the rejected face is steered away.
+        e_blocked = np.array([0.9, 0.4, 0.0], dtype=np.float32)
+        e_control = np.array([0.99, 0.01, 0.0], dtype=np.float32)
+        fid_blocked = store.insert_face(
+            image_id=img,
+            bbox=[0, 0, 10, 10],
+            det_score=0.9,
+            embedding=e_blocked,
+            model_name="insightface_buffalo_l_v1",
+        )
+        fid_control = store.insert_face(
+            image_id=img,
+            bbox=[20, 20, 10, 10],
+            det_score=0.9,
+            embedding=e_control,
+            model_name="insightface_buffalo_l_v1",
+        )
+        # Reject Anne for the blocked face.
+        run = store.create_face_run({}, _now())
+        anne_old = store.add_face_cluster(
+            run_id=run, cluster_no=0, size=1, label_auto=None, label_user="Anne"
+        )
+        store.log_face_correction(face_id=fid_blocked, image_id=img, action="unassigned", cluster_id=anne_old)
+
+        result = auto_attach_orphans(store, dry_run=False, threshold=0.3, min_margin=0.0)
+        assert result["cannot_link_skipped"] >= 1
+        # Both faces matched: control → Anne, blocked → Bea.
+        rows = {r["id"]: r for r in store.list_faces_for_image(img)}
+        assert rows[fid_control]["label_user"] == "Anne"
+        assert rows[fid_blocked]["label_user"] == "Bea"
+    finally:
+        store.close()
+
+
 def test_purge_faces(tmp_db: Path) -> None:
     store = Store(tmp_db)
     try:

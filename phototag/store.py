@@ -990,6 +990,54 @@ class Store:
         )
         return int(cur.rowcount or 0)
 
+    def cannot_link_identities_for_face(self, face_id: int) -> set[str]:
+        """Identities this face must NOT be matched to (tier-2 sticky labels).
+
+        For every `unassigned` correction logged for this face, look up the
+        rejected cluster's `label_user`. The returned set is consumed by
+        `attach_face_to_best_identity` and `auto_attach_orphans` to skip those
+        identities — so the system stops re-suggesting an identity the user
+        has already rejected for this exact face.
+        """
+        cur = self.conn.execute(
+            """
+            SELECT DISTINCT fc.label_user
+            FROM face_corrections fcr
+            JOIN face_clusters fc ON fc.id = fcr.cluster_id
+            WHERE fcr.face_id = ?
+              AND fcr.action = 'unassigned'
+              AND fc.label_user IS NOT NULL
+            """,
+            (int(face_id),),
+        )
+        return {str(r["label_user"]) for r in cur}
+
+    def cannot_link_identities_for_faces(self, face_ids: list[int]) -> dict[int, set[str]]:
+        """Bulk variant of `cannot_link_identities_for_face` — one SQL call.
+
+        Used by `auto_attach_orphans` so it doesn't N+1 the lookup. Faces with
+        no unassigned corrections are absent from the dict (callers should
+        treat missing as "empty set").
+        """
+        if not face_ids:
+            return {}
+        placeholders = ",".join("?" * len(face_ids))
+        cur = self.conn.execute(
+            f"""
+            SELECT DISTINCT fcr.face_id, fc.label_user
+            FROM face_corrections fcr
+            JOIN face_clusters fc ON fc.id = fcr.cluster_id
+            WHERE fcr.face_id IN ({placeholders})
+              AND fcr.action = 'unassigned'
+              AND fc.label_user IS NOT NULL
+            """,
+            [int(f) for f in face_ids],
+        )
+        out: dict[int, set[str]] = {}
+        for r in cur:
+            out.setdefault(int(r["face_id"]), set()).add(str(r["label_user"]))
+        return out
+
     def set_face_verified(self, face_id: int, value: int | None) -> None:
         self.conn.execute("UPDATE faces SET verified=? WHERE id=?", (value, face_id))
 
