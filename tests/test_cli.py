@@ -322,3 +322,76 @@ def test_category_cli_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert r.exit_code == 0, r.output
     payload = _last_json(r.stdout)
     assert payload["deleted"] == 1
+
+
+def test_category_per_image_override_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`phototag category map --image PATH --category C` round-trip (#27).
+
+    Validates the CLI wiring of the new manual-override layer: map →
+    `category list` shows it under `image_rules` → unmap drops it. Mutual
+    exclusion with --tag/--cluster returns exit 2."""
+    db = tmp_path / "phototag.db"
+    img_path = tmp_path / "x.jpg"
+    img_path.write_bytes(b"\xff\xd8\xff\xe0")  # minimal JPEG header — not decoded
+    s = Store(db)
+    img_id = s.upsert_image(
+        path=str(img_path),
+        hash_="h",
+        mtime=1.0,
+        width=4,
+        height=4,
+        exif=None,
+        processed_at=_now(),
+    )
+    s.close()
+
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+
+    # Need a category first.
+    r = runner.invoke(app, ["category", "add", "manual-pin"])
+    assert r.exit_code == 0, r.output
+
+    # Mutual-exclusion: --tag + --image → exit 2
+    r = runner.invoke(
+        app,
+        ["category", "map", "--category", "manual-pin", "--tag", "x", "--image", str(img_path)],
+    )
+    assert r.exit_code == 2, r.output
+
+    # Map by image
+    r = runner.invoke(
+        app,
+        ["category", "map", "--category", "manual-pin", "--image", str(img_path)],
+    )
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload["image_id"] == img_id
+    assert payload["category"] == "manual-pin"
+
+    # list shows the override under image_rules
+    r = runner.invoke(app, ["category", "list"])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert len(payload["image_rules"]) == 1
+    assert payload["image_rules"][0]["category"] == "manual-pin"
+    assert payload["image_rules"][0]["image_id"] == img_id
+
+    # Unknown image path → exit 1
+    r = runner.invoke(
+        app,
+        ["category", "map", "--category", "manual-pin", "--image", str(tmp_path / "missing.jpg")],
+    )
+    assert r.exit_code == 1, r.output
+
+    # Unmap by image
+    r = runner.invoke(app, ["category", "unmap", "--image", str(img_path)])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload["image_id"] == img_id
+    assert payload["removed"] == 1
+
+    # Re-list shows empty image_rules
+    r = runner.invoke(app, ["category", "list"])
+    payload = _last_json(r.stdout)
+    assert payload["image_rules"] == []

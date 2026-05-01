@@ -1190,19 +1190,22 @@ def category_rm(name: Annotated[str, typer.Argument(help="Category name")]) -> N
 
 @category_app.command("list")
 def category_list() -> None:
-    """Print every category + its mapped tags / face_clusters."""
+    """Print every category + its mapped tags / face_clusters / per-image
+    overrides (#27)."""
     settings = load_settings()
     store = Store(settings.db_path)
     try:
         cats = store.list_categories()
         tag_rules = store.list_tag_category_rules()
         cluster_rules = store.list_cluster_category_rules()
+        image_rules = store.list_image_category_rules()
         typer.echo(
             json.dumps(
                 {
                     "categories": cats,
                     "tag_rules": tag_rules,
                     "cluster_rules": cluster_rules,
+                    "image_rules": image_rules,
                 },
                 indent=2,
             )
@@ -1211,28 +1214,70 @@ def category_list() -> None:
         store.close()
 
 
+# Mutually-exclusive selector helper for the three rule modes.
+def _exactly_one_target(tag: str | None, cluster: int | None, image: Path | None) -> str:
+    set_count = sum(x is not None for x in (tag, cluster, image))
+    if set_count != 1:
+        typer.echo(
+            "error: pass exactly one of --tag / --cluster / --image",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if tag is not None:
+        return "tag"
+    if cluster is not None:
+        return "cluster"
+    return "image"
+
+
 @category_app.command("map")
 def category_map(
     category: Annotated[str, typer.Option(help="Target category (must already exist)")],
     tag: Annotated[str | None, typer.Option(help="Tag name to map")] = None,
     cluster: Annotated[int | None, typer.Option(help="face_cluster id to map")] = None,
+    image: Annotated[
+        Path | None,
+        typer.Option(
+            help=(
+                "Image file path to pin to a category (#27 manual override; "
+                "wins over both tag and cluster rules)"
+            )
+        ),
+    ] = None,
 ) -> None:
-    """Bind a tag or a face_cluster to a category. Exactly one of --tag /
-    --cluster must be given."""
-    if (tag is None) == (cluster is None):
-        typer.echo("error: pass exactly one of --tag or --cluster", err=True)
-        raise typer.Exit(2)
+    """Bind a tag, a face_cluster, or a single image to a category. Exactly
+    one of --tag / --cluster / --image must be given.
+
+    `--image` is the manual-override layer: it short-circuits resolution for
+    that single photo, regardless of any tag- or cluster-derived categories
+    the rule layers would assign.
+    """
+    mode = _exactly_one_target(tag, cluster, image)
     settings = load_settings()
     store = Store(settings.db_path)
     try:
         with store.transaction():
-            if tag is not None:
+            if mode == "tag":
+                assert tag is not None
                 store.map_tag_to_category(tag, category)
                 typer.echo(json.dumps({"tag": tag, "category": category}))
-            else:
+            elif mode == "cluster":
                 assert cluster is not None
                 store.map_face_cluster_to_category(cluster, category)
                 typer.echo(json.dumps({"cluster": cluster, "category": category}))
+            else:
+                assert image is not None
+                # Try both forms — production rows (post-#26) carry relative
+                # paths, but legacy rows / test fixtures may carry absolute
+                # paths. Cheap to fall through one extra lookup.
+                rel = store.relative_path(image)
+                row = store.get_image_by_path(rel)
+                if row is None and rel != str(image):
+                    row = store.get_image_by_path(str(image))
+                if row is None:
+                    raise KeyError(f"unknown image (not in DB): {image}")
+                store.map_image_to_category(row.id, category)
+                typer.echo(json.dumps({"image_id": row.id, "image": str(image), "category": category}))
     except KeyError as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
@@ -1244,22 +1289,36 @@ def category_map(
 def category_unmap(
     tag: Annotated[str | None, typer.Option(help="Tag name to unmap")] = None,
     cluster: Annotated[int | None, typer.Option(help="face_cluster id to unmap")] = None,
+    image: Annotated[
+        Path | None,
+        typer.Option(help="Image file path to unmap (drops the per-image override, #27)"),
+    ] = None,
 ) -> None:
-    """Drop a tag→category or face_cluster→category rule."""
-    if (tag is None) == (cluster is None):
-        typer.echo("error: pass exactly one of --tag or --cluster", err=True)
-        raise typer.Exit(2)
+    """Drop a tag→category, face_cluster→category, or per-image override."""
+    mode = _exactly_one_target(tag, cluster, image)
     settings = load_settings()
     store = Store(settings.db_path)
     try:
         with store.transaction():
-            if tag is not None:
+            if mode == "tag":
+                assert tag is not None
                 n = store.unmap_tag(tag)
                 typer.echo(json.dumps({"tag": tag, "removed": n}))
-            else:
+            elif mode == "cluster":
                 assert cluster is not None
                 n = store.unmap_face_cluster(cluster)
                 typer.echo(json.dumps({"cluster": cluster, "removed": n}))
+            else:
+                assert image is not None
+                rel = store.relative_path(image)
+                row = store.get_image_by_path(rel)
+                if row is None and rel != str(image):
+                    row = store.get_image_by_path(str(image))
+                if row is None:
+                    typer.echo(json.dumps({"image": str(image), "removed": 0}))
+                    return
+                n = store.unmap_image(row.id)
+                typer.echo(json.dumps({"image_id": row.id, "image": str(image), "removed": n}))
     finally:
         store.close()
 

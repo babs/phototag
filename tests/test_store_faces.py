@@ -897,3 +897,96 @@ def test_attach_helper_records_sim_after_attach(tmp_db: Path) -> None:
         assert abs(ident["sim_mean"] - float(hit["sim"])) < 1e-6
     finally:
         store.close()
+
+
+def test_per_image_category_override_short_circuits_resolution(tmp_db: Path) -> None:
+    """Manual per-image override (#27) wins over both cluster→category and
+    tag→category. `categories_for_image` returns ONLY the override when set,
+    not the union — that's the whole point of pinning a photo away from its
+    rule-derived categories."""
+    store = Store(tmp_db)
+    try:
+        img = _add_image(store, path="/tmp/a.jpg")
+        # Tag the image (would map to "medical" via rule).
+        with store.transaction():
+            store.replace_image_tags(img, "ram_plus", [("x-ray", 0.9)])
+        # Add a face cluster (would map to "family" via rule).
+        run = store.create_face_run({}, _now())
+        cl = store.add_face_cluster(run_id=run, cluster_no=0, size=1, label_auto="Anne", label_user="Anne")
+        fid = _add_face(store, img)
+        store.assign_face_to_cluster(fid, cl, distance=0.0, distance_kind="cosine_dist")
+        with store.transaction():
+            store.add_category("medical")
+            store.add_category("family")
+            store.add_category("manual-pin")
+            store.map_tag_to_category("x-ray", "medical")
+            store.map_face_cluster_to_category(cl, "family")
+
+        # Without the override: union of both rule layers.
+        assert store.categories_for_image(img) == ["family", "medical"]
+        assert store.get_image_category(img) is None
+
+        # With the override: short-circuits to the manual category alone.
+        with store.transaction():
+            store.map_image_to_category(img, "manual-pin")
+        assert store.categories_for_image(img) == ["manual-pin"]
+        assert store.get_image_category(img) == "manual-pin"
+
+        # Re-bind to a different category replaces (no duplicate row).
+        with store.transaction():
+            store.map_image_to_category(img, "family")
+        assert store.categories_for_image(img) == ["family"]
+
+        # Unmap → falls back to the union.
+        with store.transaction():
+            assert store.unmap_image(img) == 1
+        assert store.get_image_category(img) is None
+        assert store.categories_for_image(img) == ["family", "medical"]
+    finally:
+        store.close()
+
+
+def test_per_image_category_unknown_targets_raise(tmp_db: Path) -> None:
+    """`map_image_to_category` raises KeyError for unknown image_id or
+    unknown category, mirroring the tag/cluster bind helpers."""
+    store = Store(tmp_db)
+    try:
+        img = _add_image(store, path="/tmp/a.jpg")
+        with store.transaction():
+            store.add_category("real")
+        # Unknown image
+        try:
+            with store.transaction():
+                store.map_image_to_category(99999, "real")
+        except KeyError as e:
+            assert "99999" in str(e)
+        else:
+            raise AssertionError("expected KeyError for unknown image")
+        # Unknown category
+        try:
+            with store.transaction():
+                store.map_image_to_category(img, "ghost-cat")
+        except KeyError as e:
+            assert "ghost-cat" in str(e)
+        else:
+            raise AssertionError("expected KeyError for unknown category")
+    finally:
+        store.close()
+
+
+def test_per_image_category_cascade_on_image_delete(tmp_db: Path) -> None:
+    """Deleting the image should cascade-drop its image_categories row
+    (FK ON DELETE CASCADE)."""
+    store = Store(tmp_db)
+    try:
+        img = _add_image(store, path="/tmp/a.jpg")
+        with store.transaction():
+            store.add_category("c1")
+            store.map_image_to_category(img, "c1")
+        assert store.get_image_category(img) == "c1"
+        with store.transaction():
+            store.delete_image(img)
+        # Row gone via cascade — list_image_category_rules empty too.
+        assert store.list_image_category_rules() == []
+    finally:
+        store.close()

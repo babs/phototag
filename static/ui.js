@@ -282,6 +282,21 @@
       redetectFaces(id);
     });
     infoBar.appendChild(redet);
+    sep();
+    const catChip = document.createElement("a");
+    catChip.href = "#";
+    catChip.id = "info-image-category";
+    catChip.style.color = "#fcd34d";
+    const updateCatChip = (val) => {
+      catChip.textContent = val ? `\u{1F4C1} ${val}` : "\u{1F4C1} category\u2026";
+      catChip.title = val ? `manual category override (#27) \u2014 click to change or clear` : "no manual override; rules apply (click to set one)";
+    };
+    updateCatChip(info.manual_category);
+    catChip.addEventListener("click", (e) => {
+      e.preventDefault();
+      openImageCategoryForm(id, info.manual_category, updateCatChip);
+    });
+    infoBar.appendChild(catChip);
     const exifBlock = formatExifNode(info.exif);
     const root = $("lightbox-info");
     root.innerHTML = "";
@@ -805,6 +820,96 @@
       sugg.style.display = "none";
     }
     pendingFace = null;
+  }
+  function openImageCategoryForm(imageId, currentValue, onChanged) {
+    const existing = document.getElementById("image-category-form");
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    const form = document.createElement("div");
+    form.id = "image-category-form";
+    Object.assign(form.style, {
+      position: "fixed",
+      zIndex: "200",
+      background: "#222",
+      color: "#fff",
+      padding: "8px",
+      borderRadius: "4px",
+      boxShadow: "0 6px 20px rgba(0,0,0,0.5)",
+      minWidth: "320px",
+      display: "flex",
+      flexDirection: "column",
+      gap: "6px"
+    });
+    form.style.left = "50%";
+    form.style.top = "50%";
+    form.style.transform = "translate(-50%, -50%)";
+    const datalistId = `image-cat-list-${Math.random().toString(36).slice(2, 8)}`;
+    form.innerHTML = `
+    <div>\u{1F4C1} manual category for this photo (overrides rules)</div>
+    <div style="display:flex; gap:6px;">
+      <input id="image-cat-input" list="${datalistId}" type="text" placeholder="category name\u2026"
+             style="flex:1; padding:4px 6px; background:#111; color:#fff; border:1px solid #555; border-radius:3px; font-size:13px;"
+             value="${escape(currentValue || "")}">
+      <datalist id="${datalistId}"></datalist>
+      <button id="image-cat-save" type="button"
+              style="padding:4px 10px; background:#22c55e; color:#fff; border:0; border-radius:3px; cursor:pointer; font-size:12px;">save</button>
+    </div>
+    <div style="display:flex; gap:6px; justify-content:space-between;">
+      <button id="image-cat-clear" type="button" title="drop the override (rules will apply)"
+              style="padding:4px 10px; background:#52525b; color:#fff; border:0; border-radius:3px; cursor:pointer; font-size:12px;">clear override</button>
+      <button id="image-cat-cancel" type="button"
+              style="padding:4px 10px; background:#52525b; color:#fff; border:0; border-radius:3px; cursor:pointer; font-size:12px;">close (Esc)</button>
+    </div>
+  `;
+    document.body.appendChild(form);
+    const inp = $("image-cat-input");
+    let listLoaded = false;
+    inp.addEventListener("focus", async () => {
+      if (listLoaded) return;
+      listLoaded = true;
+      try {
+        const cats = await api("/api/categories");
+        const dl = document.getElementById(datalistId);
+        if (dl) for (const c of cats) {
+          const opt = document.createElement("option");
+          opt.value = c.name;
+          dl.appendChild(opt);
+        }
+      } catch (_) {
+      }
+    });
+    inp.focus();
+    inp.select();
+    const close = () => {
+      if (form.parentNode) form.parentNode.removeChild(form);
+    };
+    const submit = async (categoryOrNull) => {
+      try {
+        const result = await api(`/api/images/${imageId}/category`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ category: categoryOrNull })
+        });
+        onChanged(result.category);
+        close();
+      } catch (e) {
+        alert("failed: " + e.message);
+      }
+    };
+    $("image-cat-save").onclick = () => {
+      const v = inp.value.trim();
+      submit(v || null);
+    };
+    $("image-cat-clear").onclick = () => submit(null);
+    $("image-cat-cancel").onclick = close;
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit(inp.value.trim() || null);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    });
   }
   function faceScreenAnchor(face) {
     const img = $("lightbox-img");

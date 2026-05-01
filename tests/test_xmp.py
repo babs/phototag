@@ -272,3 +272,47 @@ def test_xmp_write_emits_hierarchical_for_cluster_rule(
     if isinstance(hier, str):
         hier = [hier]
     assert hier == ["family|Anne"], hier
+
+
+def test_xmp_write_per_image_override_short_circuits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A per-image manual category override (#27) wins over both
+    tag→category AND cluster→category at XMP write time. Only the manual
+    category is emitted as `manual|<subject>` — the tag/cluster-derived
+    ones are suppressed."""
+    db = tmp_path / "phototag.db"
+    img = tmp_path / "scene.jpg"
+    _make_jpeg(img)
+    s = Store(db)
+    image_id = s.upsert_image(
+        path=str(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
+    )
+    # Tag rule maps "x-ray" → medical.
+    s.replace_image_tags(image_id, "ram_plus", [("x-ray", 0.9)])
+    with s.transaction():
+        s.add_category("medical")
+        s.add_category("manual-pin")
+        s.map_tag_to_category("x-ray", "medical")
+        # Override pins the photo to "manual-pin", short-circuiting "medical".
+        s.map_image_to_category(image_id, "manual-pin")
+    s.close()
+
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+    r = runner.invoke(app, ["xmp", "write", str(tmp_path), "--threshold", "0.5", "--apply"])
+    assert r.exit_code == 0, r.output
+    sc = sidecar_path(img)
+    assert sc.exists()
+    # dc:Subject is unchanged — overrides only affect hierarchical keywords.
+    assert _read_subjects(sc) == ["x-ray"]
+    proc = subprocess.run(
+        ["exiftool", "-j", "-XMP-lr:HierarchicalSubject", str(sc)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(proc.stdout or "[]")
+    hier = data[0].get("HierarchicalSubject") if data else None
+    if isinstance(hier, str):
+        hier = [hier]
+    # Only manual-pin|x-ray, no medical|x-ray.
+    assert hier == ["manual-pin|x-ray"], hier

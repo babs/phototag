@@ -222,6 +222,23 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX IF NOT EXISTS idx_cluster_categories_cat ON cluster_categories(category_id);
     """,
+    """
+    -- v12: per-image manual category override (#27). The third
+    -- (highest-precedence) layer in the category resolution chain.
+    -- When present, this overrides BOTH the cluster→category and the
+    -- tag→category rules: `categories_for_image` returns only the
+    -- override and short-circuits the union. Use case: a single
+    -- mis-categorised photo that the rule layer can't fix without
+    -- introducing collateral damage on its siblings.
+    --
+    -- UNIQUE on image_id: a photo carries at most one manual override.
+    -- Re-binding replaces via ON CONFLICT(image_id) DO UPDATE.
+    CREATE TABLE IF NOT EXISTS image_categories (
+        image_id    INTEGER NOT NULL UNIQUE REFERENCES images(id) ON DELETE CASCADE,
+        category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_image_categories_cat ON image_categories(category_id);
+    """,
 ]
 
 
@@ -2008,6 +2025,59 @@ class Store:
         cur = self.conn.execute("DELETE FROM cluster_categories WHERE cluster_id=?", (int(cluster_id),))
         return int(cur.rowcount or 0)
 
+    def map_image_to_category(self, image_id: int, category_name: str) -> None:
+        """Bind a single image to a category — the third (highest-precedence)
+        rule layer (#27). Wins over both cluster→category and tag→category in
+        `categories_for_image`. Re-binding replaces (`ON CONFLICT(image_id) DO
+        UPDATE`) so the user can move a photo between categories without an
+        explicit unmap step. Caller MUST hold a write transaction."""
+        cat = self.get_category_by_name(category_name)
+        if cat is None:
+            raise KeyError(f"unknown category: {category_name}")
+        if self.get_image(image_id) is None:
+            raise KeyError(f"unknown image id: {image_id}")
+        self.conn.execute(
+            """
+            INSERT INTO image_categories(image_id, category_id) VALUES(?, ?)
+            ON CONFLICT(image_id) DO UPDATE SET category_id=excluded.category_id
+            """,
+            (int(image_id), int(cat["id"])),
+        )
+
+    def unmap_image(self, image_id: int) -> int:
+        cur = self.conn.execute("DELETE FROM image_categories WHERE image_id=?", (int(image_id),))
+        return int(cur.rowcount or 0)
+
+    def list_image_category_rules(self) -> list[dict[str, Any]]:
+        """List every per-image override (joined to image path + category name).
+        Used by `phototag category list` for the JSON dump."""
+        cur = self.conn.execute(
+            """
+            SELECT ic.image_id, i.path AS image_path, c.name AS category
+              FROM image_categories ic
+              JOIN images i ON i.id = ic.image_id
+              JOIN categories c ON c.id = ic.category_id
+             ORDER BY c.name, i.path
+            """
+        )
+        return [dict(r) for r in cur]
+
+    def get_image_category(self, image_id: int) -> str | None:
+        """Return the manually-assigned category name for this image, or None
+        if no override exists. Cheap one-row lookup; called by both
+        `categories_for_image` (resolution short-circuit) and the UI's
+        per-image popover."""
+        row = self.conn.execute(
+            """
+            SELECT c.name AS name
+              FROM image_categories ic
+              JOIN categories c ON c.id = ic.category_id
+             WHERE ic.image_id = ?
+            """,
+            (int(image_id),),
+        ).fetchone()
+        return str(row["name"]) if row else None
+
     def list_tag_category_rules(self) -> list[dict[str, Any]]:
         cur = self.conn.execute(
             """
@@ -2033,13 +2103,25 @@ class Store:
         return [dict(r) for r in cur]
 
     def categories_for_image(self, image_id: int) -> list[str]:
-        """Resolve every category that applies to this image, by union over:
-          1. cluster→category (this image's face_clusters)
-          2. tag→category (this image's tags above any threshold the caller set)
+        """Resolve every category that applies to this image. Three rule
+        layers, in precedence order:
+          1. **Manual override** (`image_categories`) — when present,
+             *short-circuits* the union and returns only this category.
+             The user has explicitly pinned this single photo.
+          2. cluster→category (this image's face_clusters)
+          3. tag→category (this image's tags above any threshold the caller set)
 
-        Returned names are unique and sorted alphabetically. Manual overrides
-        (per-image) are not yet implemented (see spec #23 follow-up).
+        Layers 2 and 3 union; layer 1 replaces the whole resolution when set.
+        Returned names are unique and sorted alphabetically.
         """
+        # #27 — manual override wins outright. We *don't* union it with the
+        # rule layers: that would defeat the point of pinning a photo away
+        # from its tag/cluster-derived categories. If the user wants both,
+        # they should add a tag/cluster rule, not a manual override.
+        manual = self.get_image_category(image_id)
+        if manual is not None:
+            return [manual]
+
         seen: set[str] = set()
         # Cluster→category: every face cluster mapped to a category that has at
         # least one face on this image is in scope.

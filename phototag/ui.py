@@ -79,6 +79,12 @@ class ClusterBindRequest(BaseModel):
     cluster_id: int
 
 
+class ImageCategoryRequest(BaseModel):
+    # category=None means "drop the override", category=str means "set/replace".
+    # The single endpoint handles both flows so the JS can submit one form.
+    category: str | None
+
+
 class BboxRedrawRequest(BaseModel):
     # bbox in DETECT_MAX_SIDE-resized coords, matching the storage format used
     # by `faces.detect()` and the face overlay render math.
@@ -1112,7 +1118,38 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="image not found")
         tags = [{"name": n, "score": sc} for n, sc in s.list_image_tags(image_id)]
         exif = s.get_image_exif(image_id)
-        return {**meta, "tags": tags, "exif": exif}
+        # Surface the per-image manual category (#27) so the lightbox can
+        # render the chip + open the popover with the current value
+        # pre-filled. None means "no override; rules apply".
+        manual_category = s.get_image_category(image_id)
+        return {
+            **meta,
+            "tags": tags,
+            "exif": exif,
+            "manual_category": manual_category,
+        }
+
+    @app.put("/api/images/{image_id}/category")
+    def api_image_category_set(image_id: int, body: ImageCategoryRequest) -> dict[str, Any]:
+        """Set or clear the per-image manual category override (#27).
+
+        `category=null` clears the override (resolution falls back to the
+        cluster + tag rule layers). `category="..."` sets / replaces it.
+        Unknown image_id → 404; unknown category name → 404.
+        """
+        s = _store(app)
+        if s.get_image(image_id) is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        if body.category is None or body.category.strip() == "":
+            with s.transaction():
+                n = s.unmap_image(image_id)
+            return {"image_id": image_id, "category": None, "removed": n}
+        try:
+            with s.transaction():
+                s.map_image_to_category(image_id, body.category.strip())
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e).strip("'\"")) from e
+        return {"image_id": image_id, "category": body.category.strip()}
 
     # Allow the browser to cache image content for a day, but require it to
     # revalidate (no `immutable`) — that way a code change that re-generates

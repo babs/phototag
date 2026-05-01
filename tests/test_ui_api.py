@@ -948,3 +948,69 @@ def test_redraw_bbox_too_small_422(client: TestClient, seeded_db: Path, tmp_path
     r = client.post("/api/faces/1/redraw-bbox", json={"bbox": [10, 10, 20, 20]})
     assert r.status_code == 422
     assert "bbox too small" in r.json()["detail"]
+
+
+# ---- /api/images/{id}/category — per-image manual override (#27) ----------
+
+
+def test_image_category_set_clear_round_trip(client: TestClient, seeded_db: Path) -> None:
+    """PUT /api/images/{id}/category with category=str pins the image; with
+    category=null clears the override. /api/images/{id} surfaces it."""
+    s = Store(seeded_db)
+    img_id = next(iter(s.iter_images())).id
+    with s.transaction():
+        s.add_category("manual-pin")
+    s.close()
+
+    # Initially: no override → manual_category=None in image detail.
+    r = client.get(f"/api/images/{img_id}")
+    assert r.status_code == 200
+    assert r.json()["manual_category"] is None
+
+    # Set the override.
+    r = client.put(f"/api/images/{img_id}/category", json={"category": "manual-pin"})
+    assert r.status_code == 200
+    assert r.json() == {"image_id": img_id, "category": "manual-pin"}
+
+    # Detail surfaces it.
+    assert client.get(f"/api/images/{img_id}").json()["manual_category"] == "manual-pin"
+
+    # Re-binding to another category replaces (single row per image).
+    s = Store(seeded_db)
+    with s.transaction():
+        s.add_category("manual-pin-2")
+    s.close()
+    r = client.put(f"/api/images/{img_id}/category", json={"category": "manual-pin-2"})
+    assert r.status_code == 200
+    assert client.get(f"/api/images/{img_id}").json()["manual_category"] == "manual-pin-2"
+
+    # Clear with null → removed=1.
+    r = client.put(f"/api/images/{img_id}/category", json={"category": None})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["category"] is None
+    assert body["removed"] == 1
+    assert client.get(f"/api/images/{img_id}").json()["manual_category"] is None
+
+    # Empty-string treated as clear (defensive against form whitespace).
+    s = Store(seeded_db)
+    with s.transaction():
+        s.map_image_to_category(img_id, "manual-pin")
+    s.close()
+    r = client.put(f"/api/images/{img_id}/category", json={"category": "  "})
+    assert r.status_code == 200
+    assert r.json()["category"] is None
+
+
+def test_image_category_unknown_image_404(client: TestClient) -> None:
+    r = client.put("/api/images/99999/category", json={"category": "anything"})
+    assert r.status_code == 404
+
+
+def test_image_category_unknown_category_404(client: TestClient, seeded_db: Path) -> None:
+    s = Store(seeded_db)
+    img_id = next(iter(s.iter_images())).id
+    s.close()
+    r = client.put(f"/api/images/{img_id}/category", json={"category": "ghost-cat"})
+    assert r.status_code == 404
+    assert "ghost-cat" in r.json()["detail"]
