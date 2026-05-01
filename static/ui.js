@@ -518,7 +518,7 @@ function renderFaceOverlays() {
     // Marker logic for the title and label prefix:
     //   ⚠  duplicate name on this photo → almost certainly false positive
     //   ✓  user-verified (drawn via CSS ::before, kept out of textContent here)
-    //   ?  named but never user-confirmed (model said "Alex", you didn't agree yet)
+    //   ?  named but never user-confirmed (model proposed a name, you didn't agree yet)
     box.title = dupName
       ? `${f.label} appears ${nameCount.get(f.label)}× on this photo — likely false positive`
       : userVerified

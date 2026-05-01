@@ -342,7 +342,7 @@ def test_clear_noise_labels(client: TestClient, seeded_db: Path) -> None:
     assert run is not None
     # Force a noise cluster to carry a (historically-buggy) label.
     noise = s.add_face_cluster(run_id=run, cluster_no=-1, size=5, label_auto="noise", label_user=None)
-    s.conn.execute("UPDATE face_clusters SET label_user='Alex' WHERE id=?", (noise,))
+    s.conn.execute("UPDATE face_clusters SET label_user='Carol' WHERE id=?", (noise,))
     s.close()
     r = client.post("/api/faces/clear-noise-labels", json={})
     assert r.status_code == 200
@@ -354,7 +354,7 @@ def test_clear_noise_labels(client: TestClient, seeded_db: Path) -> None:
 
 
 def test_face_verify_and_drop_dups(client: TestClient, seeded_db: Path) -> None:
-    """User can verify one Alex face on a photo and drop the other dups."""
+    """User can verify one face on a photo and drop the other same-name dups."""
     s = Store(seeded_db)
     run = s.latest_face_run()
     assert run is not None

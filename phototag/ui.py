@@ -606,8 +606,8 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             # Insert new detections that did NOT match a kept validated face,
             # then immediately try to auto-attach each to a known identity by
             # cosine sim against face_identities centroids — so a freshly-
-            # detected "Alex" face gets the name without waiting for a
-            # full `phototag faces cluster` run. High-confidence matches
+            # detected face for a known person gets the name without waiting
+            # for a full `phototag faces cluster` run. High-confidence matches
             # (sim >= 0.7) are auto-validated; marginal matches stay "?" so
             # the user reviews via the validate-named bulk action.
             inserted = 0
@@ -700,8 +700,8 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     @app.delete("/api/images/{image_id}/faces/dups-of/{label}")
     def api_drop_dups_on_image(image_id: int, label: str, keep_face_id: int) -> dict[str, Any]:
         """Drop faces on this image that carry `label` (label_user) except
-        `keep_face_id` (the verified one). Use after the user marks the real
-        detection of "Alex" verified to clean up the false-positive triple."""
+        `keep_face_id` (the verified one). Use after the user verifies the
+        real detection of a person to clean up the false-positive duplicates."""
         s = _store(app)
         if s.get_image(image_id) is None:
             raise HTTPException(status_code=404, detail="image not found")

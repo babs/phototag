@@ -737,10 +737,10 @@ def attach_face_to_best_identity(
     cannot = store.cannot_link_identities_for_face(face_id)
 
     # Track top-2 so we can refuse to attach when the choice is ambiguous
-    # (top1 - top2 < min_margin). On the live corpus we observed faces with
-    # Brooke 0.581 vs Carla 0.577 — a 0.004 margin where deterministic
-    # tie-break is essentially random and "named-but-wrong" is worse than
-    # "still-orphan, prompt me".
+    # (top1 - top2 < min_margin). On a real corpus we observed faces with
+    # two near-equal candidates (e.g. 0.581 vs 0.577) — a 0.004 margin
+    # where deterministic tie-break is essentially random and "named-but-
+    # wrong" is worse than "still-orphan, prompt me".
     best_name: str | None = None
     best_sim = -1.0
     second_sim = -1.0
