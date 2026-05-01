@@ -253,6 +253,60 @@ def exif_backfill(
         store.close()
 
 
+@app.command(name="geo-tag")
+def geo_tag(
+    limit: Annotated[int | None, typer.Option(help="optional row cap")] = None,
+    force: Annotated[bool, typer.Option(help="re-tag even if geo tags already present")] = False,
+) -> None:
+    """Reverse-geocode EXIF GPS and add city/country tags (model_name=geo_v1)."""
+    from .geo import reverse_lookup, to_tags
+
+    settings = load_settings()
+    log = get_logger("phototag.geo")
+    store = Store(settings.db_path)
+    counts = {
+        "considered": 0,
+        "tagged": 0,
+        "no_gps": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
+    try:
+        rows = list(store.iter_images())
+        if limit is not None:
+            rows = rows[:limit]
+        with store.transaction():
+            for r in rows:
+                exif = store.get_image_exif(r.id) or {}
+                gps = exif.get("gps")
+                if not gps:
+                    counts["no_gps"] += 1
+                    continue
+                counts["considered"] += 1
+                if not force:
+                    has = store.conn.execute(
+                        "SELECT 1 FROM image_tags WHERE image_id=? AND model_name='geo_v1' LIMIT 1",
+                        (r.id,),
+                    ).fetchone()
+                    if has:
+                        counts["skipped"] += 1
+                        continue
+                geo = reverse_lookup(float(gps["lat"]), float(gps["lon"]))
+                if not geo:
+                    counts["failed"] += 1
+                    continue
+                tags = to_tags(geo)
+                if not tags:
+                    counts["failed"] += 1
+                    continue
+                store.replace_image_tags(r.id, "geo_v1", tags)
+                counts["tagged"] += 1
+        log.info("geo_tag_done", **counts)
+        typer.echo(json.dumps(counts, indent=2))
+    finally:
+        store.close()
+
+
 @app.command()
 def serve(
     host: Annotated[str, typer.Option(help="bind address")] = "127.0.0.1",

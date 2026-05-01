@@ -21,6 +21,7 @@ phototag/
 │   ├── search.py             # semantic search            (v1.5)
 │   ├── reporting.py          # jinja2 HTML reports        (v1)
 │   ├── xmp.py                # sidecar writer             (v2)
+│   ├── faces.py              # detect + embed + cluster   (v2, opt-in)
 │   └── migrations/
 │       ├── 0001_init.sql
 │       ├── 0002_embeddings.sql

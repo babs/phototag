@@ -59,7 +59,16 @@ phototag category map --tag T   --category C
 phototag category map --cluster N --category C
 phototag category list
 phototag category apply
+
+phototag faces detect [--gpu] [--limit N] [--i-understand]
+phototag faces cluster [--min-size 3] [--min-samples 2]
+phototag faces name CLUSTER_ID NAME
+phototag faces unname CLUSTER_ID
+phototag faces purge [--keep-identities]
+phototag faces report [--out report-faces/]
 ```
+
+Faces are **opt-in** and biometric — see [`15-faces.md`](15-faces.md).
 
 ## Exit codes
 

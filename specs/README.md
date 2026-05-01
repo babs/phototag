@@ -21,6 +21,7 @@ Local, scriptable photo-tagging tool. Scans a library, tags via RAM++, derives a
 | 12 | [performance.md](12-performance.md) | Perf targets |
 | 13 | [risks.md](13-risks.md) | Risks, mitigations |
 | 14 | [testing.md](14-testing.md) | Test strategy |
+| 15 | [faces.md](15-faces.md) | v2 face detection / recognition / clustering (opt-in) |
 
 ## Source
 

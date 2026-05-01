@@ -12,7 +12,7 @@
 
 ## Privacy
 
-- **Faces** — RAM does not perform face recognition. If needed later: integrate `InsightFace` or similar, **opt-in only**, in a separate command. Never on by default. Don't store face embeddings without explicit user action.
+- **Faces** — RAM does not perform face recognition. v2 adds `phototag faces detect|cluster|name` via `InsightFace` (RetinaFace + ArcFace), **opt-in only**, in a separate command, gated by `--i-understand` on first run. See [`15-faces.md`](15-faces.md). Embeddings never leave the machine; `phototag faces purge` wipes everything. Never enabled by default in `scan`.
 - **GPS** — extracted into `images.exif_json`. If the user shares the DB, GPS leaks. Provide `phototag scrub --gps` to drop GPS fields.
 
 ## Idempotence

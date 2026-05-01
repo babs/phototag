@@ -164,9 +164,10 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         exif = s.get_image_exif(image_id)
         return {**meta, "tags": tags, "exif": exif}
 
-    # Long-lived cache: image content is keyed by image_id which is stable;
-    # if the file changes the row gets replaced (and id reused only on rescan).
-    _CACHE_HEADERS = {"Cache-Control": "public, max-age=86400, immutable"}
+    # Allow the browser to cache image content for a day, but require it to
+    # revalidate (no `immutable`) — that way a code change that re-generates
+    # thumbs/previews server-side actually shows up after a normal reload.
+    _CACHE_HEADERS = {"Cache-Control": "public, max-age=86400, must-revalidate"}
 
     def _serve_resized(image_id: int, cache_dir: Path, max_side: int, quality: int) -> FileResponse:
         s = _store(app)

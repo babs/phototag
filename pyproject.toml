@@ -47,13 +47,14 @@ report = [
 heic = ["pillow-heif>=0.16"]
 raw = ["rawpy>=0.21"]
 exif = ["piexif>=1.1"]
+geo = ["reverse_geocoder>=1.5.1"]
 ui = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "fastapi-structured-logging>=0.5",
     "jinja2>=3.1",
 ]
-all = ["phototag[ram,clip,cluster,report,heic,raw,exif,ui]"]
+all = ["phototag[ram,clip,cluster,report,heic,raw,exif,geo,ui]"]
 
 [dependency-groups]
 dev = [

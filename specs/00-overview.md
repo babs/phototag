@@ -36,6 +36,8 @@ The corpus content is unknown a priori, so the v1 deliverable is the *full disco
 - XMP sidecar writes (portable tags, read by digiKam, Lightroom, …)
 - Tags + clusters → user-defined categories mapping
 - Minimal web UI (FastAPI + HTMX or Streamlit)
+- **Face recognition & clustering** (opt-in, see [`15-faces.md`](15-faces.md)):
+  detect → embed → cluster → name → browse + clickable lightbox overlay
 
 ## Recommended starting point
 

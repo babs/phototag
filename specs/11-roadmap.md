@@ -34,12 +34,17 @@ Defer-until-needed extras that depend on v1 already exposing the corpus.
 | 12 | Cluster rename workflow | 0.5 d | `label_user` editable from report or CLI |
 | 13 | Test suite hardening | 0.5 d | CI green on slow integration |
 
-## v2 — Productivity (~1.5 days)
+## v2 — Productivity (~3 days)
 
 | # | Task | Effort | Verifiable output |
 |---|---|---|---|
 | 14 | XMP writer | 0.5 d | Tags visible in digiKam |
 | 15 | Categories + tag/cluster mapping | 1 d | Configurable rules, persisted |
+| 16 | Faces — detect + embed (`[face]` extra) | 0.5 d | `phototag faces detect` populates faces table |
+| 17 | Faces — cluster + identity carry-over | 0.5 d | `phototag faces cluster` produces stable people |
+| 18 | Faces — UI panel + lightbox overlay | 0.5 d | Click face → person gallery; rename propagates |
+
+Faces details in [`15-faces.md`](15-faces.md). **Opt-in** via `--i-understand` on first run; processes biometric data, never leaves the machine.
 
 ## Total
 

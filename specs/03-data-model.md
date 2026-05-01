@@ -65,6 +65,44 @@ CREATE TABLE image_clusters (
 );
 CREATE INDEX idx_image_clusters_cluster ON image_clusters(cluster_id);
 
+-- v2 — face recognition (opt-in; see 15-faces.md)
+CREATE TABLE faces (
+    id           INTEGER PRIMARY KEY,
+    image_id     INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    bbox_json    TEXT NOT NULL,
+    det_score    REAL NOT NULL,
+    embedding    BLOB NOT NULL,
+    dim          INTEGER NOT NULL,
+    model_name   TEXT NOT NULL,
+    landmarks_json TEXT
+);
+CREATE TABLE face_runs (
+    id INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    params_json TEXT NOT NULL
+);
+CREATE TABLE face_clusters (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES face_runs(id) ON DELETE CASCADE,
+    cluster_no INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    label_user TEXT,
+    label_auto TEXT
+);
+CREATE TABLE face_cluster_assignments (
+    face_id    INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
+    cluster_id INTEGER NOT NULL REFERENCES face_clusters(id) ON DELETE CASCADE,
+    distance   REAL NOT NULL,
+    PRIMARY KEY (face_id, cluster_id)
+);
+CREATE TABLE face_identities (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    centroid BLOB NOT NULL,
+    dim INTEGER NOT NULL,
+    n_samples INTEGER NOT NULL
+);
+
 -- v2
 CREATE TABLE categories (
     id   INTEGER PRIMARY KEY,
