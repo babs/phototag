@@ -150,6 +150,11 @@ GET    /api/people/by-name/{name}                 → merged person view (every
                                                     cluster sharing the name +
                                                     aggregate counts)
 GET    /api/people/by-name/{name}/clusters        → just the cluster rows
+GET    /api/people/by-name/{name}/edge?limit=9     → N farthest-from-centroid
+                                                    faces of this person
+                                                    (DESC by distance), for
+                                                    quick "ambiguous fringe"
+                                                    triage
 POST   /api/people/by-name/{name}/rename          → rename every cluster of name
                                                     (noise cluster is skipped)
 POST   /api/people/by-name/{name}/split           → suffix into "name 1", "name 2", …

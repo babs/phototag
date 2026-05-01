@@ -250,6 +250,40 @@ def test_by_name_merged_view(client: TestClient, seeded_db: Path) -> None:
     assert len(body["groups"]) == 2
 
 
+def test_by_name_edge_view(client: TestClient, seeded_db: Path) -> None:
+    """`/api/people/by-name/{name}/edge` returns the N farthest faces of the
+    person, sorted DESC by distance, across every cluster sharing the label.
+    """
+    s = Store(seeded_db)
+    run = s.latest_face_run()
+    assert run is not None
+    img2_id = _image_id(s, "/tmp/b.jpg")
+    img1_id = _image_id(s, "/tmp/a.jpg")
+    cid2 = s.add_face_cluster(run_id=run, cluster_no=7, size=1, label_auto=None, label_user="Anne")
+    f_far = _add_face(s, img2_id, bbox=[1, 1, 10, 10])
+    f_mid = _add_face(s, img1_id, bbox=[2, 2, 10, 10])
+    s.assign_face_to_cluster(f_far, cid2, 0.95)
+    s.assign_face_to_cluster(f_mid, cid2, 0.40)
+    s.close()
+    r = client.get("/api/people/by-name/Anne/edge?limit=2")
+    assert r.status_code == 200
+    rows = r.json()
+    assert len(rows) == 2
+    # Sorted DESC by distance: 0.95 first, then 0.40.
+    assert rows[0]["face_id"] == f_far
+    assert rows[0]["distance"] >= rows[1]["distance"]
+    assert rows[1]["face_id"] == f_mid
+    # Each row carries the per-face triage payload.
+    for row in rows:
+        for k in ("face_id", "image_id", "path", "bbox", "distance", "cluster_id", "cluster_no"):
+            assert k in row
+
+
+def test_by_name_edge_unknown_name_404(client: TestClient) -> None:
+    r = client.get("/api/people/by-name/Nobody/edge")
+    assert r.status_code == 404
+
+
 def test_only_unnamed_filter(client: TestClient, seeded_db: Path) -> None:
     """`/api/people?only_unnamed=true` returns only clusters lacking label_user."""
     s = Store(seeded_db)

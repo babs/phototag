@@ -239,3 +239,23 @@
     background: var(--accent); color: #fff; border-radius: 4px; cursor: pointer;
   }
   .help-overlay .help-close .key { opacity: 0.7; font-size: 11px; margin-left: 6px; }
+
+  /* Person-page fringe row: a horizontal strip of the N most-uncertain
+     faces (farthest from cluster centroid) for quick triage. */
+  .fringe-row {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    margin: 8px 0 12px; padding: 8px;
+    background: #fef3c7; border-radius: 4px;
+  }
+  .fringe-cell {
+    display: flex; flex-direction: column; align-items: center;
+    cursor: pointer; gap: 2px;
+  }
+  .fringe-cell img {
+    width: 72px; height: 72px; object-fit: cover;
+    border-radius: 3px; border: 1px solid var(--border); background: #fff;
+  }
+  .fringe-cell:hover img { border-color: var(--accent); }
+  .fringe-cell .fringe-meta {
+    font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace;
+  }

@@ -934,6 +934,22 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             "groups": groups,
         }
 
+    @app.get("/api/people/by-name/{name}/edge")
+    def api_person_edge(
+        name: str,
+        limit: Annotated[int, Query(ge=1, le=100)] = 9,
+    ) -> list[dict[str, Any]]:
+        """Most-distant-from-centroid faces across every cluster of `name`.
+
+        The "fringe" of an identity — members the clusterer is least sure
+        about. Returned sorted DESC by distance so triage starts at the
+        riskiest face.
+        """
+        s = _store(app)
+        if not s.list_clusters_by_label(name):
+            raise HTTPException(status_code=404, detail="no clusters with this name")
+        return s.list_edge_faces_by_label(name, limit=limit)
+
     @app.get("/api/people/{cluster_id}")
     def api_person(
         cluster_id: int,

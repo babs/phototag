@@ -1560,6 +1560,35 @@ class Store:
             out.append(d)
         return out
 
+    def list_edge_faces_by_label(self, label: str, *, limit: int = 9) -> list[dict[str, Any]]:
+        """Faces farthest from centroid across every cluster carrying `label`.
+
+        Sorted DESC by `distance` so the most-uncertain (most likely
+        misassigned) appear first. Used by the UI's "fringe" panel to surface
+        ambiguous members without scrolling the whole identity grid.
+        """
+        sql = """
+            SELECT f.id AS face_id, f.image_id, f.bbox_json, fca.distance,
+                   fca.cluster_id, fc.cluster_no, i.path
+            FROM face_cluster_assignments fca
+            JOIN face_clusters fc ON fc.id = fca.cluster_id
+            JOIN faces f ON f.id = fca.face_id
+            JOIN images i ON i.id = f.image_id
+            WHERE fc.label_user = ?
+            ORDER BY fca.distance DESC, f.id
+            LIMIT ?
+        """
+        cur = self.conn.execute(sql, (label, int(limit)))
+        out: list[dict[str, Any]] = []
+        for row in cur:
+            d = dict(row)
+            try:
+                d["bbox"] = json.loads(d.pop("bbox_json"))
+            except json.JSONDecodeError:
+                d["bbox"] = None
+            out.append(d)
+        return out
+
     def set_face_cluster_label_user(self, cluster_id: int, label: str | None) -> None:
         self.conn.execute(
             "UPDATE face_clusters SET label_user=? WHERE id=?",
