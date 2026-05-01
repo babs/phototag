@@ -149,6 +149,46 @@ def test_doctor_detects_and_fixes_size_mismatch(tmp_path: Path, monkeypatch: pyt
     s.close()
 
 
+def test_faces_corrections_compact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`faces corrections-compact` keeps only the most-recent row per face_id."""
+    db = _seed_two_images(tmp_path)
+    s = Store(db)
+    # 5 corrections for face_id=1, 3 for face_id=2 — total 8 rows, 2 survivors.
+    for i in range(5):
+        s.log_face_correction(face_id=1, image_id=1, action="named", name=f"n{i}")
+    for i in range(3):
+        s.log_face_correction(face_id=2, image_id=1, action="named", name=f"m{i}")
+    s.conn.commit()
+    s.close()
+
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+    # dry-run: reports 6 to delete, no actual change
+    r = runner.invoke(app, ["faces", "corrections-compact"])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload["before"] == 8
+    assert payload["survivors"] == 2
+    assert payload["projected_delete"] == 6
+    assert payload["deleted"] == 0
+    s = Store(db)
+    assert len(s.list_face_corrections()) == 8
+    s.close()
+    # --apply: collapses to one row per face_id
+    r = runner.invoke(app, ["faces", "corrections-compact", "--apply"])
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload["deleted"] == 6
+    s = Store(db)
+    rows = s.list_face_corrections()
+    assert len(rows) == 2
+    by_face = {r["face_id"]: r for r in rows}
+    # The most-recent name (highest id) per face survives.
+    assert by_face[1]["name"] == "n4"
+    assert by_face[2]["name"] == "m2"
+    s.close()
+
+
 def test_prune_dry_run_then_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`prune` flags missing-on-disk rows in dry-run; --apply deletes them."""
     db = tmp_path / "phototag.db"

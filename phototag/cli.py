@@ -886,6 +886,56 @@ def faces_corrections(
         store.close()
 
 
+@faces_app.command("corrections-compact")
+def faces_corrections_compact(
+    apply: Annotated[bool, typer.Option(help="actually delete; otherwise dry-run")] = False,
+) -> None:
+    """Collapse `face_corrections` to the most-recent row per face_id.
+
+    The audit log grows monotonically (one row per user action). The
+    sticky-replay pass already keeps only the most-recent row per face_id,
+    so older rows are dead weight: they bloat the DB and slow scans without
+    influencing matching. This command drops them; the very last row per
+    face_id (and per bulk NULL face_id batch) survives.
+
+    Default is a dry-run that reports the projected delete count.
+    """
+    settings = load_settings()
+    log = get_logger("phototag.faces")
+    store = Store(settings.db_path)
+    try:
+        before = int(store.conn.execute("SELECT COUNT(*) AS n FROM face_corrections").fetchone()["n"])
+        survivors = int(
+            store.conn.execute(
+                "SELECT COUNT(*) AS n FROM (SELECT 1 FROM face_corrections GROUP BY COALESCE(face_id, -1))"
+            ).fetchone()["n"]
+        )
+        projected = before - survivors
+        deleted = 0
+        if apply and projected:
+            with store.transaction():
+                deleted = store.compact_face_corrections()
+        log.info(
+            "corrections_compacted",
+            apply=apply,
+            before=before,
+            survivors=survivors,
+            projected=projected,
+            deleted=deleted,
+        )
+        payload: dict[str, Any] = {
+            "before": before,
+            "survivors": survivors,
+            "projected_delete": projected,
+            "deleted": deleted,
+        }
+        if not apply and projected:
+            payload["hint"] = f"dry-run; pass --apply to delete {projected} row(s)"
+        typer.echo(json.dumps(payload, indent=2))
+    finally:
+        store.close()
+
+
 @faces_app.command("auto-attach")
 def faces_auto_attach(
     threshold: Annotated[float, typer.Option(help="min cosine sim to attach to a known identity")] = 0.5,

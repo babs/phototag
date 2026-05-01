@@ -322,6 +322,7 @@ phototag faces name            CLUSTER_ID NAME
 phototag faces unname          CLUSTER_ID
 phototag faces clear-noise-labels
 phototag faces corrections     [--action ACT] [--face-id N] [--limit N]
+phototag faces corrections-compact [--apply]
 phototag faces stats
 phototag faces purge           [--keep-identities] [--yes]
 phototag faces report          [--out report-faces/]

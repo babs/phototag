@@ -964,6 +964,32 @@ class Store:
         sql += " ORDER BY id DESC"
         return [dict(r) for r in self.conn.execute(sql, params)]
 
+    def compact_face_corrections(self) -> int:
+        """Collapse the audit log to the most-recent row per face_id.
+
+        The sticky-replay logic in `apply_sticky_corrections` already dedups
+        per face_id, keeping only the highest-id row — so older rows are dead
+        weight for matching purposes. We also keep just the most-recent
+        face_id IS NULL row (bulk-action audits like auto-attach summaries).
+
+        The full historical sequence is intentionally lost; the audit table
+        is sized for matching, not forensics. Returns the row-delete count.
+        """
+        # COALESCE(face_id, -1) buckets all NULL face_id rows together so the
+        # GROUP BY yields a single survivor for them too — a plain GROUP BY
+        # face_id would emit one survivor per NULL (sqlite groups NULLs
+        # individually) or drop them entirely depending on the engine.
+        cur = self.conn.execute(
+            """
+            DELETE FROM face_corrections
+            WHERE id NOT IN (
+                SELECT MAX(id) FROM face_corrections
+                GROUP BY COALESCE(face_id, -1)
+            )
+            """
+        )
+        return int(cur.rowcount or 0)
+
     def set_face_verified(self, face_id: int, value: int | None) -> None:
         self.conn.execute("UPDATE faces SET verified=? WHERE id=?", (value, face_id))
 
