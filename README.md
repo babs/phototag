@@ -2,6 +2,8 @@
 
 Local photo tagging and clustering. Scans a folder, tags each image with RAM++, embeds with CLIP, clusters with UMAP+HDBSCAN, produces a navigable HTML report.
 
+**New here? Read [`GETTING_STARTED.md`](GETTING_STARTED.md) — a TL;DR of install, daily commands, UI shortcuts.**
+
 See [`specs/`](specs/) for the design.
 
 ## Install
