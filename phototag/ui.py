@@ -259,7 +259,10 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         if meta is None:
             raise HTTPException(status_code=404, detail="cluster not found")
         members = [
-            {"image_id": iid, "path": p, "distance": d}
+            # image_clusters.distance is always UMAP-Euclidean (no manual
+            # write path here, unlike face_cluster_assignments). Kind is
+            # surfaced for symmetry with the people endpoints — see store v9.
+            {"image_id": iid, "path": p, "distance": d, "distance_kind": "euclidean_umap"}
             for iid, p, d in s.cluster_members(cluster_id, limit=limit)
         ]
         top_tags = [{"name": n, "count": c} for n, c in s.cluster_top_tags(cluster_id, top=30)]
@@ -905,6 +908,8 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     "named": f["label_user"] is not None,
                     "color": cluster_color(f["cluster_id"]),
                     "attach_sim": f.get("attach_sim"),
+                    "distance": f.get("distance"),
+                    "distance_kind": f.get("distance_kind"),
                 }
             )
         return out
@@ -1053,9 +1058,12 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             (run_id, name),
         ).fetchone()
         with s.transaction():
+            # Manual name: distance=0.0 is a placeholder (the user asserted
+            # the match), and the kind is recorded as 'cosine_dist' to keep
+            # the manual run consistent with auto-attach (see store v9).
             if crow:
                 cid = int(crow["id"])
-                s.assign_face_to_cluster(face_id, cid, distance=0.0)
+                s.assign_face_to_cluster(face_id, cid, distance=0.0, distance_kind="cosine_dist")
                 s.conn.execute("UPDATE face_clusters SET size=size+1 WHERE id=?", (cid,))
             else:
                 max_no_row = s.conn.execute(
@@ -1070,7 +1078,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     label_auto=name,
                     label_user=name,
                 )
-                s.assign_face_to_cluster(face_id, cid, distance=0.0)
+                s.assign_face_to_cluster(face_id, cid, distance=0.0, distance_kind="cosine_dist")
 
             # Running-mean identity centroid so future cluster runs match.
             emb_row = s.conn.execute("SELECT dim, embedding FROM faces WHERE id=?", (face_id,)).fetchone()

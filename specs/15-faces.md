@@ -69,9 +69,10 @@ CREATE TABLE face_clusters (
 );
 
 CREATE TABLE face_cluster_assignments (
-    face_id    INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
-    cluster_id INTEGER NOT NULL REFERENCES face_clusters(id) ON DELETE CASCADE,
-    distance   REAL NOT NULL,
+    face_id       INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
+    cluster_id    INTEGER NOT NULL REFERENCES face_clusters(id) ON DELETE CASCADE,
+    distance      REAL NOT NULL,
+    distance_kind TEXT,                     -- v9: 'euclidean_umap' | 'cosine_dist'
     PRIMARY KEY (face_id, cluster_id)
 );
 ```
@@ -154,7 +155,11 @@ GET    /api/people/by-name/{name}/edge?limit=9     → N farthest-from-centroid
                                                     faces of this person
                                                     (DESC by distance), for
                                                     quick "ambiguous fringe"
-                                                    triage
+                                                    triage. Each entry carries
+                                                    `distance_kind` (v9:
+                                                    'euclidean_umap' | 'cosine_dist')
+                                                    so the UI can label the
+                                                    scale.
 POST   /api/people/by-name/{name}/rename          → rename every cluster of name
                                                     (noise cluster is skipped)
 POST   /api/people/by-name/{name}/split           → suffix into "name 1", "name 2", …

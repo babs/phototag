@@ -118,9 +118,10 @@ CREATE TABLE face_clusters (
     label_auto TEXT
 );
 CREATE TABLE face_cluster_assignments (
-    face_id    INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
-    cluster_id INTEGER NOT NULL REFERENCES face_clusters(id) ON DELETE CASCADE,
-    distance   REAL NOT NULL,
+    face_id       INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
+    cluster_id    INTEGER NOT NULL REFERENCES face_clusters(id) ON DELETE CASCADE,
+    distance      REAL NOT NULL,
+    distance_kind TEXT,                     -- v9: 'euclidean_umap' | 'cosine_dist'
     PRIMARY KEY (face_id, cluster_id)
 );
 CREATE TABLE face_identities (
@@ -159,3 +160,12 @@ Re-tagging is gated by `(hash, mtime)`. Path changes alone don't trigger re-tagg
 ## Migrations
 
 Schema migrations: simple numbered SQL files in `phototag/migrations/`. Apply in order, store `schema_version` in a `meta(key, value)` table.
+
+### v9 — `face_cluster_assignments.distance_kind`
+
+```sql
+ALTER TABLE face_cluster_assignments ADD COLUMN distance_kind TEXT;
+UPDATE face_cluster_assignments SET distance_kind = 'euclidean_umap' WHERE distance_kind IS NULL;
+```
+
+`distance` historically mixed two scales: Euclidean distance in UMAP-reduced space (written by `cluster_faces` / `cluster_orphan_faces`) and `1.0 - cosine_sim` (written by manual / auto-attach paths). Sorting a mixed cluster was meaningless. `distance_kind` makes the scale explicit (`'euclidean_umap'` or `'cosine_dist'`) so the UI can format the value correctly. Pre-existing rows came from the UMAP path, so the backfill is safe.
