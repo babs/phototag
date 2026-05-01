@@ -49,39 +49,55 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | 23 | Categories + tag/cluster mapping (v2 leftover) | ⬜ | 1 d | schema + CLI + UI mapping rules (see `08-xmp-categories.md`) |
 | 24 | CI pipeline | ⬜ | 4 h | GitHub Actions workflow: ruff + mypy + pytest -m "not slow"; nightly slow run |
 | 25 | JS bundling / module split | 🟢 | 1 d | source moved to `static/src/{state,api,lightbox,sidebar,workspace,keyboard,runs,main}.js`; esbuild bundles to `static/ui.js` (single ES2020 IIFE) via `make js-build` / `make js-watch`; `package.json` + `package-lock.json` committed, `node_modules/` gitignored; bundle output stays committed so the app works without running the bundler; `<script>` cache-buster `?v={{ version }}` unchanged. Fallback path when no bundler is installed: `make js-build` prints an install hint and exits non-zero — contributors run `npm install` once. |
+| 26 | Photo paths relative to the DB | ⬜ | 1 d | `images.path` today stores absolute paths (`/home/.../Pictures/IMG_001.jpg`), which means the DB can only be opened on the host that scanned it. Switch to paths *relative to a base directory* (the symlinked corpus root) and store the base in `meta(key='photo_root', value=…)`. Resolution is `Path(meta.photo_root) / images.path` everywhere a file is read (`prune`, `redetect-faces`, EXIF backfill, thumb / preview / raw / face-thumb endpoints, scanner skip-known check). The symlink itself moves: `data/photo-corpus/` → `data/pictures/` (shorter, friendlier). Pre-release: no migration story for legacy rows — the change ships with a fresh schema bump that wipes `images` rows; users re-run `phototag scan ./data/pictures`. |
 
 ## What's already shipped (current state)
 
 Hardening:
 - thread-local SQLite + write lock + busy_timeout
-- atomic JPEG cache writes, PIL handle leaks fixed
-- transactional schema migrations (v8 = `tags.kind`, v7 = `faces.user_verified`)
+- atomic JPEG cache writes (incl. /face-thumb), PIL handle leaks fixed
+- transactional schema migrations through v9
+  (v5 verified, v6 corrections, v7 user_verified, v8 tag.kind, v9 distance_kind)
 - DOM-built event listeners (no inline onclick interpolation → no XSS surface)
 - `phototag prune` for stale-row cleanup
-- `phototag doctor` for DB health + auto-fix
-- optional `APP_API_TOKEN` shared-secret middleware (constant-time compare;
-  CORS preflight passes through)
+- `phototag doctor` for DB health + auto-fix (parallel SELECTs;
+  `ok` flag respects post-fix state)
+- `phototag backup` atomic SQLite snapshot
+- optional `APP_API_TOKEN` / `APP_API_TOKEN_FILE` middleware
+  (constant-time compare; CORS preflight passes through; file-watched rotation)
 
 Faces:
 - detect / cluster / verify / refine-noise / auto-attach / clear-noise-labels
 - per-face validate, drop-dups, drop-unidentified, redetect (preserves
   validated faces by IoU)
 - Hungarian identity assignment + sample-weighted centroid blend
+  (`IDENTITY_SAMPLE_CAP=200`)
 - tier-1 sticky-label correction replay on every cluster pass
+- tier-2 hard-negative mining (cannot-link from `unassigned` corrections)
+- identity merge UI + endpoint (sample-weighted blend; audit-logged)
+- corrections-compact CLI (preserves every `unassigned` row so cannot-link
+  survives the compaction)
+- distance_kind column on `face_cluster_assignments` (Euclidean vs cosine)
 
 CLI:
 - list / stats / export / query (CLIP semantic search)
-- prune / doctor / rename / rename-bulk
-- faces stats reports unidentified + user_verified counts
-- faces corrections audit dump
+- prune / doctor / backup / rename / rename-bulk
+- faces detect / cluster / verify / refine-noise / auto-attach / name /
+  unname / clear-noise-labels / corrections / corrections-compact / stats / purge
+- xmp write / clean (sidecar export via exiftool subprocess)
 
 UI:
-- noise/orphan sidebar selector
+- single-file SPA → ESM modules (`static/src/*.js` → esbuild bundle)
+- noise/orphan sidebar selector + triage queue selector
 - quick filter (AND tokens, bold matches, X clear)
 - top-tags collapsible
-- ⚠ duplicate-name hint, ? un-validated marker, sim badge for auto-attached
+- ⚠ duplicate-name hint, `?` un-validated marker, sim badge for
+  auto-attached, ✓ implicit on validated, distance_kind tag in fringe view
+- top-K identity suggestions on the popover (cannot-link aware)
+- person merged view + edge gallery (9 most-uncertain) + identity merge
 - "?" keyboard help overlay
-- N — jump to next unidentified
+- `N` — jump to next unidentified, `V` — validate-and-advance,
+  `G` — go-to-person, `W` — wrong, `X` — drop dups
 
 Specs aligned: 02 (Python 3.14), 03 (v5/v6/v7/v9 schema), 09 (full CLI),
 11 (roadmap status), 12 (memory budget), 13 (UI exposure), 15 (face API
@@ -89,37 +105,43 @@ Specs aligned: 02 (Python 3.14), 03 (v5/v6/v7/v9 schema), 09 (full CLI),
 
 ## Picking the next sprint
 
-Seven items remain (⬜ above). Grouped by ROI on the daily flow:
+Six items remain (⬜ above) — listed by daily-flow ROI:
 
 **Matching quality** (1 day each):
 - **#4** — per-identity threshold tuning. Use the per-attach sim
-  distributions we now collect to raise `auto_verify_threshold` for
+  distributions we collect to raise `auto_verify_threshold` for
   high-variance identities (kids growing, glasses on/off).
 - **#12** — re-cluster preview members. The dry-run already returns the
   cluster IDs; surface the ~5 faces nearest each centroid in a UI
   expander before persisting.
 
-**v2 leftovers** (1 day each):
-- **#22** — XMP sidecar writer. `phototag xmp write/clean` via exiftool;
-  makes tags portable to digiKam / Lightroom.
+**v2 leftover** (1 day):
 - **#23** — categories + tag/cluster mapping (see `08-xmp-categories.md`).
-  Pairs with #22.
+  Pairs with the now-shipped #22 XMP writer to populate the `lr:HierarchicalSubject`
+  field.
+
+**Portability** (1 day):
+- **#26** — photo paths relative to the DB + rename `data/photo-corpus`
+  to `data/pictures`. Today every `images.path` is absolute; the DB only
+  works on the host that scanned it. Switch to `meta.photo_root` + a
+  relative `images.path` so a `data/` directory is movable. Pre-release:
+  no migration story — schema bump wipes images, user re-scans.
 
 **Bigger swing** (~2 days each):
 - **#7** — constrained HDBSCAN (tier-3 sticky). Semi-supervised cluster
   pass that consumes both `named` and `unassigned` corrections as
-  must-link / cannot-link constraints. Best-quality clustering
-  improvement; new dependency.
-- **#13** — drag-to-redraw bbox. Per-image bbox edit + re-embed via
-  insightface. Largest UX upside but heaviest impl.
+  must-link / cannot-link constraints during clustering itself (today
+  cannot-link is enforced post-cluster at the identity-match step).
+  Best-quality clustering improvement; likely new dependency.
+- **#13** — drag-to-redraw bbox (deferred). Per-image bbox edit + re-embed
+  via insightface. Largest UX upside but heaviest impl. Skipped this
+  sprint pending a clearer design discussion.
 
-**Infra** (independent track):
+**Infra** (independent track, deferred):
 - **#24** — CI pipeline. GitHub Actions: ruff + mypy + pytest -m "not
-  slow"; nightly slow run.
-- **#25** — JS bundling / module split (DONE). Source split into
-  `static/src/{state,api,lightbox,sidebar,workspace,keyboard,runs,main}.js`;
-  esbuild bundles to `static/ui.js` via `make js-build`. Bundle output is
-  committed so the app works without running the bundler.
+  slow"; nightly slow run. Long-shot at the moment.
 
-Recommended next pick for a focused day: **#22** XMP writer (the
-last v2 leftover that affects everyday use).
+Recommended next pick: **#26** (photo paths relative) before any user
+ships a real corpus — it's a schema change that cascades everywhere file
+paths are read, easier to do while no real user data depends on the
+current shape. Then **#23** to round out the v2 surface.
