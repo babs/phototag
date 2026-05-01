@@ -103,6 +103,8 @@
     pointer-events: auto; cursor: pointer;
     transition: opacity 0.1s;
   }
+  .face-box.suspect { border-style: dashed; border-color: #ef4444; opacity: 0.85; }
+  .face-box.suspect .face-label { background: #ef4444; color: #fff; }
   .face-box:hover { box-shadow: 0 0 0 4px rgba(255,255,255,0.25); }
   .face-box .face-label {
     position: absolute; bottom: -22px; left: 0; padding: 1px 6px; font-size: 11px;
@@ -501,7 +503,8 @@ function renderFaceOverlays() {
     if (!f.bbox || f.bbox.length !== 4) continue;
     const [x, y, w, h] = f.bbox;
     const box = document.createElement('div');
-    box.className = 'face-box' + (f.named ? '' : ' unnamed');
+    const suspect = f.verified === 0 || (f.det_score != null && f.det_score < 0.65);
+    box.className = 'face-box' + (f.named ? '' : ' unnamed') + (suspect ? ' suspect' : '');
     box.style.setProperty('--c', f.color);
     box.style.left = (x * sx) + 'px';
     box.style.top = (y * sy) + 'px';

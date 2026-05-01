@@ -330,6 +330,66 @@ def name_cluster(store: Store, cluster_id: int, name: str | None) -> None:
                     store.upsert_face_identity(name, centroid, n_samples=len(vecs))
 
 
+def verify_faces(
+    store: Store,
+    *,
+    min_det_score: float = 0.65,
+    min_area: int = 32 * 32,
+    apply: bool = False,
+) -> dict[str, int]:
+    """Walk faces, mark each as verified=1/0 based on cheap heuristics.
+
+    With `apply=True`, faces failing verification are deleted (cluster sizes
+    auto-adjusted via Store.delete_face). Otherwise the rows stay and the UI
+    shows them with a low-confidence indicator (verified=0).
+
+    Heuristics:
+    - det_score < min_det_score → suspicious
+    - bbox area < min_area      → too small for ArcFace to embed reliably
+    """
+    counts = {
+        "checked": 0,
+        "kept": 0,
+        "low_score": 0,
+        "small": 0,
+        "deleted": 0,
+        "skipped": 0,
+    }
+    rows = list(store.iter_faces_for_verify())
+    log.info(
+        "faces_verify_started",
+        n=len(rows),
+        min_det_score=min_det_score,
+        min_area=min_area,
+        apply=apply,
+    )
+    with store.transaction():
+        for r in rows:
+            counts["checked"] += 1
+            if r["bbox"] is None:
+                counts["skipped"] += 1
+                continue
+            area = int(r["bbox"][2]) * int(r["bbox"][3])
+            score = float(r["det_score"])
+            bad_score = score < min_det_score
+            bad_size = area < min_area
+            if bad_score or bad_size:
+                if bad_score:
+                    counts["low_score"] += 1
+                if bad_size:
+                    counts["small"] += 1
+                if apply:
+                    store.delete_face(int(r["id"]))
+                    counts["deleted"] += 1
+                else:
+                    store.set_face_verified(int(r["id"]), 0)
+            else:
+                counts["kept"] += 1
+                store.set_face_verified(int(r["id"]), 1)
+    log.info("faces_verify_done", **counts)
+    return counts
+
+
 def crop_face(img: Image.Image, bbox: list[int], *, margin: float = 0.25) -> Image.Image:
     """Crop a face from an image with a margin, EXIF-corrected first.
 
@@ -364,6 +424,7 @@ __all__ = [
     "detect_faces_all",
     "cluster_faces",
     "name_cluster",
+    "verify_faces",
     "crop_face",
     "cluster_color",
 ]

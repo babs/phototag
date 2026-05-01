@@ -439,6 +439,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     "id": f["id"],
                     "bbox": f["bbox"],
                     "det_score": f["det_score"],
+                    "verified": f["verified"],
                     "cluster_id": f["cluster_id"],
                     "cluster_no": f["cluster_no"],
                     "label": f["label_user"] or f["label_auto"],

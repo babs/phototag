@@ -115,6 +115,11 @@ MIGRATIONS: list[str] = [
         n_samples INTEGER NOT NULL
     );
     """,
+    """
+    -- v5: per-face verification flag (set by `phototag faces verify`).
+    -- NULL = not checked yet; 1 = passed; 0 = failed.
+    ALTER TABLE faces ADD COLUMN verified INTEGER;
+    """,
 ]
 
 
@@ -568,7 +573,7 @@ class Store:
     def list_faces_for_image(self, image_id: int) -> list[dict[str, Any]]:
         cur = self.conn.execute(
             """
-            SELECT f.id, f.bbox_json, f.det_score,
+            SELECT f.id, f.bbox_json, f.det_score, f.verified,
                    fc.id AS cluster_id, fc.cluster_no, fc.label_user, fc.label_auto
             FROM faces f
             LEFT JOIN face_cluster_assignments fca ON fca.face_id = f.id
@@ -588,6 +593,7 @@ class Store:
                     "id": int(row["id"]),
                     "bbox": bbox,
                     "det_score": float(row["det_score"]),
+                    "verified": row["verified"],
                     "cluster_id": row["cluster_id"],
                     "cluster_no": row["cluster_no"],
                     "label_user": row["label_user"],
@@ -754,6 +760,19 @@ class Store:
                 (r["cluster_id"],),
             )
         self.conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
+
+    def set_face_verified(self, face_id: int, value: int | None) -> None:
+        self.conn.execute("UPDATE faces SET verified=? WHERE id=?", (value, face_id))
+
+    def iter_faces_for_verify(self) -> Iterator[dict[str, Any]]:
+        cur = self.conn.execute("SELECT id, image_id, bbox_json, det_score, verified FROM faces")
+        for row in cur:
+            d = dict(row)
+            try:
+                d["bbox"] = json.loads(d.pop("bbox_json"))
+            except json.JSONDecodeError:
+                d["bbox"] = None
+            yield d
 
     def delete_all_faces_for_image(self, image_id: int) -> int:
         """Drop every face row for the image; bulk-update affected cluster sizes."""

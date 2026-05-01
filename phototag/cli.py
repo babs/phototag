@@ -451,6 +451,36 @@ def faces_purge(
         store.close()
 
 
+@faces_app.command("verify")
+def faces_verify(
+    min_score: Annotated[
+        float, typer.Option("--min-score", help="reject faces with det_score below this")
+    ] = 0.65,
+    min_area: Annotated[int, typer.Option(help="reject faces whose bbox area is smaller (px²)")] = 32 * 32,
+    apply: Annotated[
+        bool,
+        typer.Option(help="actually delete failing rows; otherwise just flag verified=0"),
+    ] = False,
+) -> None:
+    """Heuristic verification of detected faces.
+
+    Without --apply: marks `faces.verified` = 1 (kept) or 0 (suspect); UI shows
+    suspect faces with a dashed red border so you can review.
+    With --apply: deletes failing rows (cluster sizes auto-adjusted).
+    """
+    from .faces import verify_faces
+
+    settings = load_settings()
+    log = get_logger("phototag.faces")
+    store = Store(settings.db_path)
+    try:
+        counts = verify_faces(store, min_det_score=min_score, min_area=min_area, apply=apply)
+        log.info("faces_verify_summary", **counts)
+        typer.echo(json.dumps(counts, indent=2))
+    finally:
+        store.close()
+
+
 @faces_app.command("stats")
 def faces_stats() -> None:
     """Quick counts: faces, clusters, runs, identities."""
