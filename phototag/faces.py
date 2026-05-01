@@ -196,6 +196,54 @@ def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
+def _hungarian_identity_match(
+    cluster_ids: list[int],
+    cluster_centroids: dict[int, np.ndarray],
+    identities: list[dict[str, Any]],
+    *,
+    threshold: float,
+) -> dict[int, dict[str, Any]]:
+    """Assign at most one identity per new cluster (and vice versa) using the
+    Hungarian algorithm so two new clusters can never claim the same identity.
+
+    Returns {cluster_no: identity_row} for the matched pairs (sim >= threshold).
+    Falls back to greedy if scipy isn't available — same correctness for the
+    one-cluster-per-identity invariant, just less optimal under ties.
+    """
+    if not cluster_ids or not identities:
+        return {}
+    sim = np.zeros((len(cluster_ids), len(identities)), dtype=np.float32)
+    for i, cid in enumerate(cluster_ids):
+        c = cluster_centroids[cid]
+        for j, ident in enumerate(identities):
+            sim[i, j] = _cosine_sim(c, ident["centroid"])
+
+    try:
+        from scipy.optimize import linear_sum_assignment
+
+        # Maximize similarity → solve as cost = -sim.
+        rows, cols = linear_sum_assignment(-sim)
+    except Exception:  # scipy missing or solver bailed; fall back to greedy.
+        rows, cols = [], []
+        used_ident: set[int] = set()
+        order = sorted(
+            range(len(cluster_ids)),
+            key=lambda i: -float(sim[i].max() if sim.shape[1] else 0.0),
+        )
+        for i in order:
+            j = int(np.argmax([sim[i, k] if k not in used_ident else -1.0 for k in range(len(identities))]))
+            if sim[i, j] >= threshold and j not in used_ident:
+                rows.append(i)
+                cols.append(j)
+                used_ident.add(j)
+
+    out: dict[int, dict[str, Any]] = {}
+    for i, j in zip(rows, cols, strict=True):
+        if sim[i, j] >= threshold:
+            out[cluster_ids[i]] = identities[j]
+    return out
+
+
 def cluster_faces(
     store: Store,
     *,
@@ -245,18 +293,12 @@ def cluster_faces(
         red_centroids[lv] = np.vstack([rv for _, _, rv in m]).mean(axis=0)
 
     identities = store.list_face_identities()
-
-    def match_identity(centroid: np.ndarray) -> dict[str, Any] | None:
-        if not identities:
-            return None
-        best, best_sim = None, -1.0
-        for ident in identities:
-            sim = _cosine_sim(centroid, ident["centroid"])
-            if sim > best_sim:
-                best, best_sim = ident, sim
-        if best is None or best_sim < identity_match_threshold:
-            return None
-        return best
+    identity_assignment = _hungarian_identity_match(
+        sorted(emb_centroids.keys()),
+        emb_centroids,
+        identities,
+        threshold=identity_match_threshold,
+    )
 
     params = {
         "model": MODEL_NAME,
@@ -282,7 +324,7 @@ def cluster_faces(
             label_user = None
             label_auto = "noise" if lv == -1 else f"person {lv}"
             if lv != -1:
-                hit = match_identity(emb_centroids[lv])
+                hit = identity_assignment.get(lv)
                 if hit is not None:
                     label_user = hit["name"]
             cid = store.add_face_cluster(
@@ -300,17 +342,31 @@ def cluster_faces(
                 for fid, _, rvec in m:
                     d = float(np.linalg.norm(rvec - centroid))
                     store.assign_face_to_cluster(fid, cid, distance=d)
-            # When a cluster carries a name, refresh the identity centroid with
-            # the new evidence (running mean weighted by sample count).
+            # When a cluster carries a name, refresh the identity centroid as
+            # a sample-weighted running mean (so a one-photo recluster doesn't
+            # erase a hundred-photo identity).
             if lv != -1 and label_user is not None:
-                store.upsert_face_identity(label_user, emb_centroids[lv], n_samples=len(m))
+                hit = identity_assignment[lv]
+                n_old = int(hit.get("n_samples", 0)) or 0
+                old_c = np.asarray(hit["centroid"], dtype=np.float32)
+                blended = ((old_c * n_old + emb_centroids[lv] * len(m)) / max(1, n_old + len(m))).astype(
+                    np.float32, copy=False
+                )
+                store.upsert_face_identity(label_user, blended, n_samples=n_old + len(m))
+
+    # Tier-1 sticky-label post-pass: replay user corrections so a 'named'
+    # action you took last week survives this re-cluster, and an 'unassigned'
+    # face doesn't slip back into the same wrong identity.
+    with store.transaction():
+        sticky = apply_sticky_corrections(store, run_id)
 
     log.info(
         "faces_cluster_done",
         run_id=run_id,
         n_clusters=sum(1 for k in members if k != -1),
         n_noise=len(members.get(-1, [])),
-        named=sum(1 for lv in members if lv != -1 and match_identity(emb_centroids[lv])),
+        named=len(identity_assignment),
+        sticky=sticky,
     )
     return run_id
 
@@ -389,23 +445,17 @@ def cluster_orphan_faces(
         red_centroids[lv] = np.vstack([rv for _, _, rv in m]).mean(axis=0)
 
     identities = store.list_face_identities()
-
-    def match_identity(centroid: np.ndarray) -> dict[str, Any] | None:
-        if not identities:
-            return None
-        best, best_sim = None, -1.0
-        for ident in identities:
-            sim = _cosine_sim(centroid, ident["centroid"])
-            if sim > best_sim:
-                best, best_sim = ident, sim
-        if best is None or best_sim < identity_match_threshold:
-            return None
-        return best
+    identity_assignment = _hungarian_identity_match(
+        sorted(emb_centroids.keys()),
+        emb_centroids,
+        identities,
+        threshold=identity_match_threshold,
+    )
 
     summary_clusters: list[dict[str, Any]] = []
     for lv in sorted(k for k in members if k != -1):
         m = members[lv]
-        hit = match_identity(emb_centroids[lv])
+        hit = identity_assignment.get(lv)
         summary_clusters.append(
             {
                 "cluster_no": int(lv),
@@ -469,10 +519,9 @@ def cluster_orphan_faces(
             m = members[lv]
             label_user = None
             label_auto = "noise" if lv == -1 else f"orphan-cluster {lv}"
-            if lv != -1:
-                hit = match_identity(emb_centroids[lv])
-                if hit is not None:
-                    label_user = hit["name"]
+            hit = identity_assignment.get(lv) if lv != -1 else None
+            if hit is not None:
+                label_user = hit["name"]
             cid = store.add_face_cluster(
                 run_id=run_id,
                 cluster_no=lv,
@@ -488,8 +537,18 @@ def cluster_orphan_faces(
                 for fid, _, rvec in m:
                     d = float(np.linalg.norm(rvec - centroid))
                     store.assign_face_to_cluster(fid, cid, distance=d)
-            if lv != -1 and label_user is not None:
-                store.upsert_face_identity(label_user, emb_centroids[lv], n_samples=len(m))
+            if hit is not None and label_user is not None:
+                # Sample-weighted blend (same as cluster_faces).
+                n_old = int(hit.get("n_samples", 0)) or 0
+                old_c = np.asarray(hit["centroid"], dtype=np.float32)
+                blended = ((old_c * n_old + emb_centroids[lv] * len(m)) / max(1, n_old + len(m))).astype(
+                    np.float32, copy=False
+                )
+                store.upsert_face_identity(label_user, blended, n_samples=n_old + len(m))
+
+    # Tier-1 sticky-label post-pass on the orphan run too.
+    with store.transaction():
+        sticky = apply_sticky_corrections(store, run_id)
 
     log.info(
         "faces_orphan_recluster_done",
@@ -497,6 +556,7 @@ def cluster_orphan_faces(
         n_clusters=n_clusters,
         n_noise=n_noise,
         named_via_identity=named_via_identity,
+        sticky=sticky,
     )
     return {
         "run_id": run_id,
@@ -507,6 +567,69 @@ def cluster_orphan_faces(
         "named_via_identity": named_via_identity,
         "clusters": summary_clusters,
     }
+
+
+def apply_sticky_corrections(store: Store, run_id: int) -> dict[str, int]:
+    """Replay user corrections onto the freshly-created face_run.
+
+    Tier-1 implementation (per spec/15-faces.md):
+    - `named` corrections force the face's cluster to carry that label_user.
+      If the cluster currently has a *different* label_user, the user's last
+      naming wins.
+    - `unassigned` corrections look up the face's current cluster in this run
+      and, if its label_user matches the *old* cluster's identity (i.e. the
+      auto-clusterer placed it there again), reassign the face to noise so
+      the user has a chance to re-label it.
+    Counts what it changed so callers can log it.
+    """
+    counts = {"named": 0, "unassigned": 0}
+    # Resolve a single noise cluster id for this run, if any. We need it to
+    # park `unassigned` corrections that re-fired.
+    noise_row = store.conn.execute(
+        "SELECT id FROM face_clusters WHERE run_id=? AND cluster_no=-1 LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    noise_cid = int(noise_row["id"]) if noise_row else None
+
+    corrections = store.list_face_corrections()
+    # Most-recent-first → keep the latest user intent per face.
+    seen: set[int] = set()
+    for c in corrections:
+        fid = c.get("face_id")
+        if fid is None or fid in seen:
+            continue
+        seen.add(int(fid))
+        action = c["action"]
+        # Map face_id → its cluster in *this* run (window pick).
+        row = store.conn.execute(
+            """
+            SELECT fc.id AS cid, fc.label_user
+            FROM face_cluster_assignments fca
+            JOIN face_clusters fc ON fc.id = fca.cluster_id
+            WHERE fca.face_id = ? AND fc.run_id = ?
+            LIMIT 1
+            """,
+            (int(fid), run_id),
+        ).fetchone()
+        if row is None:
+            continue
+        cid = int(row["cid"])
+        cur_label = row["label_user"]
+        if action == "named" and c.get("name"):
+            if cur_label != c["name"]:
+                store.set_face_cluster_label_user(cid, str(c["name"]))
+                counts["named"] += 1
+        elif action == "unassigned" and noise_cid is not None and cid != noise_cid:
+            # Park the face under noise within this run.
+            store.conn.execute(
+                "DELETE FROM face_cluster_assignments WHERE face_id=? AND cluster_id=?",
+                (int(fid), cid),
+            )
+            store.conn.execute("UPDATE face_clusters SET size = MAX(0, size - 1) WHERE id=?", (cid,))
+            store.assign_face_to_cluster(int(fid), noise_cid, distance=0.0)
+            store.conn.execute("UPDATE face_clusters SET size = size + 1 WHERE id=?", (noise_cid,))
+            counts["unassigned"] += 1
+    return counts
 
 
 def name_cluster(store: Store, cluster_id: int, name: str | None) -> None:
@@ -637,6 +760,7 @@ __all__ = [
     "detect_faces_all",
     "cluster_faces",
     "cluster_orphan_faces",
+    "apply_sticky_corrections",
     "name_cluster",
     "verify_faces",
     "crop_face",

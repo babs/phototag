@@ -203,3 +203,32 @@
     position: absolute; top: 16px; left: 20px; color: #fff;
     font-size: 12px; opacity: 0.6;
   }
+  .help-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 300;
+  }
+  .help-overlay .help-card {
+    background: #fff; color: var(--fg); border-radius: 6px;
+    padding: 18px 22px; max-width: 560px; max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+  }
+  .help-overlay h2 { margin: 0 0 12px; font-size: 16px; }
+  .help-overlay table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .help-overlay td { padding: 4px 8px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+  .help-overlay td:first-child { white-space: nowrap; color: var(--muted); }
+  .help-overlay th.grp {
+    text-align: left; font-size: 11px; text-transform: uppercase;
+    color: var(--muted); letter-spacing: 0.5px; padding: 12px 8px 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .help-overlay kbd {
+    background: #f4f4f5; border: 1px solid #d4d4d8; border-bottom-width: 2px;
+    border-radius: 3px; padding: 1px 6px; font-size: 11px; font-family: ui-monospace, monospace;
+    color: #18181b;
+  }
+  .help-overlay .help-close {
+    margin-top: 14px; padding: 6px 14px; border: 0;
+    background: var(--accent); color: #fff; border-radius: 4px; cursor: pointer;
+  }
+  .help-overlay .help-close .key { opacity: 0.7; font-size: 11px; margin-left: 6px; }

@@ -22,27 +22,31 @@ Goal: from raw folder to navigable HTML report of clusters with thumbnails. End-
 
 **Gate** — Run on a 500–1000 photo sample. Inspect the report. Decide what to invest in next: more accuracy (better tagger, manual cluster validation) or more productivity (XMP, categories).
 
-## v1.5 — Polish & search (~2.5 days)
+## v1.5 — Polish & search (~2.5 days) — **shipped**
 
 Defer-until-needed extras that depend on v1 already exposing the corpus.
 
-| # | Task | Effort | Verifiable output |
+| # | Task | Effort | Status |
 |---|---|---|---|
-| 9 | Semantic search (`query`) | 0.5 d | `query "x-ray"` returns relevant images |
-| 10 | `list` / `stats` / `export` | 0.5 d | CLI filtering by tag / cluster |
-| 11 | EXIF extraction | 0.5 d | Date / GPS persisted, filterable |
-| 12 | Cluster rename workflow | 0.5 d | `label_user` editable from report or CLI |
-| 13 | Test suite hardening | 0.5 d | CI green on slow integration |
+| 9 | Semantic search (`query`) | 0.5 d | **done** — `phototag query "TEXT"` |
+| 10 | `list` / `stats` / `export` | 0.5 d | **done** |
+| 11 | EXIF extraction | 0.5 d | **done** — `phototag exif-backfill`, GPS persisted |
+| 12 | Cluster rename workflow | 0.5 d | **done** — `phototag rename` / `rename-bulk` + UI |
+| 13 | Test suite hardening | 0.5 d | partial — 58 tests; cluster path still uncovered |
+| 13b | `prune` (stale-row cleanup) | 0.5 d | **done** — `phototag prune --apply` |
 
 ## v2 — Productivity (~3 days)
 
-| # | Task | Effort | Verifiable output |
+| # | Task | Effort | Status |
 |---|---|---|---|
-| 14 | XMP writer | 0.5 d | Tags visible in digiKam |
-| 15 | Categories + tag/cluster mapping | 1 d | Configurable rules, persisted |
-| 16 | Faces — detect + embed (`[face]` extra) | 0.5 d | `phototag faces detect` populates faces table |
-| 17 | Faces — cluster + identity carry-over | 0.5 d | `phototag faces cluster` produces stable people |
-| 18 | Faces — UI panel + lightbox overlay | 0.5 d | Click face → person gallery; rename propagates |
+| 14 | XMP writer | 0.5 d | **pending** — needs exiftool / pyexiv2 design |
+| 15 | Categories + tag/cluster mapping | 1 d | **pending** — schema + UI surface |
+| 16 | Faces — detect + embed (`[face]` extra) | 0.5 d | **done** |
+| 17 | Faces — cluster + identity carry-over (Hungarian) | 0.5 d | **done** — sample-weighted centroid update |
+| 18 | Faces — UI panel + lightbox overlay | 0.5 d | **done** — popover, validate, drop-dups, dup hint |
+| 19 | Faces — orphan re-cluster (dry-run + persist) | 0.5 d | **done** — `phototag faces refine-noise` |
+| 20 | Faces — sticky-label correction post-pass | 0.5 d | **done — tier 1** (named/unassigned replay) |
+| 21 | Optional API token (single-user shared secret) | 0.25 d | **done** — `APP_API_TOKEN` env |
 
 Faces details in [`15-faces.md`](15-faces.md). **Opt-in** via `--i-understand` on first run; processes biometric data, never leaves the machine.
 

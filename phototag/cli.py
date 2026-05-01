@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -138,6 +138,191 @@ def report(
     try:
         index = generate_report(store, out_dir=out, run_id=run_id)
         typer.echo(str(index))
+    finally:
+        store.close()
+
+
+@app.command()
+def prune(
+    apply: Annotated[bool, typer.Option(help="actually delete; otherwise dry-run")] = False,
+    limit: Annotated[int | None, typer.Option(help="cap rows scanned")] = None,
+) -> None:
+    """Detect images whose file no longer exists on disk and (with --apply) drop them.
+
+    Cluster sizes / tag counts / face assignments cascade via FK ON DELETE.
+    Default is a dry-run that prints what would be removed.
+    """
+    settings = load_settings()
+    log = get_logger("phototag.prune")
+    store = Store(settings.db_path)
+    counts = {"checked": 0, "missing": 0, "deleted": 0}
+    missing_paths: list[str] = []
+    try:
+        rows = list(store.iter_images())
+        if limit is not None:
+            rows = rows[:limit]
+        counts["checked"] = len(rows)
+        for r in rows:
+            if Path(r.path).exists():
+                continue
+            counts["missing"] += 1
+            missing_paths.append(r.path)
+        if apply and missing_paths:
+            with store.transaction():
+                for r in rows:
+                    if not Path(r.path).exists():
+                        store.delete_image(r.id)
+                        counts["deleted"] += 1
+        log.info("prune_summary", apply=apply, **counts)
+        payload: dict[str, Any] = {**counts, "missing_paths": missing_paths[:50]}
+        if not apply and counts["missing"]:
+            payload["hint"] = f"dry-run; pass --apply to delete {counts['missing']} row(s)"
+        typer.echo(json.dumps(payload, indent=2))
+    finally:
+        store.close()
+
+
+@app.command(name="list")
+def list_images(
+    tag: Annotated[list[str] | None, typer.Option(help="filter by tag (repeatable, AND)")] = None,
+    score_min: Annotated[float, typer.Option(help="min mean score across matched tags")] = 0.0,
+    limit: Annotated[int, typer.Option(help="cap rows printed")] = 100,
+    fmt: Annotated[str, typer.Option("--format", help="json | tsv")] = "json",
+) -> None:
+    """List images filtered by tag(s)."""
+    if not tag:
+        raise typer.BadParameter("--tag is required (one or more)")
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        results = store.search_images_by_tags(tag, min_score=score_min, limit=limit)
+        if fmt == "tsv":
+            for r in results:
+                typer.echo(f"{r['id']}\t{r['score']:.3f}\t{r['path']}")
+        else:
+            typer.echo(json.dumps(results, indent=2, default=str))
+    finally:
+        store.close()
+
+
+@app.command()
+def stats(
+    top: Annotated[int, typer.Option(help="top N tags to print")] = 50,
+    kind: Annotated[str | None, typer.Option(help="filter tag kind: label | geo (default: all)")] = None,
+) -> None:
+    """Tag distribution + corpus counts."""
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        n_images = store.count_images()
+        rows = store.list_tag_names(limit=top, kind=kind)
+        n_faces = store.count_faces()
+        out = {
+            "images": n_images,
+            "faces": n_faces,
+            "top_tags": [{"name": n, "count": c} for n, c in rows],
+        }
+        typer.echo(json.dumps(out, indent=2))
+    finally:
+        store.close()
+
+
+@app.command()
+def export(
+    fmt: Annotated[str, typer.Option("--format", help="json | csv")] = "json",
+    out: Annotated[Path | None, typer.Option(help="output file (default stdout)")] = None,
+    min_score: Annotated[float, typer.Option(help="drop tags below this score")] = 0.0,
+) -> None:
+    """Dump (image_id, path, [tags]) for the whole corpus."""
+    import csv
+    import io
+
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        rows = list(store.iter_images())
+        records: list[dict[str, Any]] = []
+        for r in rows:
+            tags = [{"name": n, "score": s} for n, s in store.list_image_tags(r.id, min_score=min_score)]
+            records.append(
+                {
+                    "id": r.id,
+                    "path": r.path,
+                    "hash": r.hash,
+                    "width": r.width,
+                    "height": r.height,
+                    "tags": tags,
+                }
+            )
+        if fmt == "csv":
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            w.writerow(["id", "path", "hash", "width", "height", "tags"])
+            for rec in records:
+                w.writerow(
+                    [
+                        rec["id"],
+                        rec["path"],
+                        rec["hash"],
+                        rec["width"],
+                        rec["height"],
+                        ",".join(f"{t['name']}:{t['score']:.2f}" for t in rec["tags"]),
+                    ]
+                )
+            payload = buf.getvalue()
+        else:
+            payload = json.dumps(records, indent=2, default=str)
+        if out is not None:
+            out.write_text(payload, encoding="utf-8")
+            typer.echo(f"wrote {len(records)} record(s) to {out}")
+        else:
+            typer.echo(payload)
+    finally:
+        store.close()
+
+
+@app.command()
+def query(
+    text: Annotated[str, typer.Argument(help="free-text query")],
+    limit: Annotated[int, typer.Option(help="top-K results")] = 30,
+    embedder_name: Annotated[
+        str | None, typer.Option("--embedder", help="embedder model_name (auto: most populated)")
+    ] = None,
+) -> None:
+    """Semantic search by text against cached CLIP embeddings."""
+    import numpy as np
+
+    from .models.clip import ClipEmbedder
+
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        if embedder_name is None:
+            row = store.conn.execute(
+                "SELECT model_name, COUNT(*) AS n FROM embeddings GROUP BY model_name ORDER BY n DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                raise typer.BadParameter("No embeddings in DB. Run `phototag embed` first.")
+            embedder_name = row["model_name"]
+        ids, mat = store.load_embeddings(embedder_name)
+        if not ids:
+            typer.echo("[]")
+            return
+        embedder = ClipEmbedder(settings.models_dir, device=settings.device)
+        q = embedder.embed_texts([text])[0].astype(np.float32, copy=False)
+        # CLIP image embeddings are L2-normalized; normalize the query too.
+        qn = q / (np.linalg.norm(q) + 1e-12)
+        mn = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-12)
+        scores = mn @ qn
+        idx = np.argsort(-scores)[:limit]
+        out = []
+        for i in idx:
+            iid = ids[int(i)]
+            meta = store.get_image(int(iid))
+            if meta is None:
+                continue
+            out.append({"id": iid, "path": meta["path"], "score": float(scores[int(i)])})
+        typer.echo(json.dumps(out, indent=2, default=str))
     finally:
         store.close()
 
@@ -519,6 +704,25 @@ def faces_refine_noise(
         )
         log.info("faces_orphan_recluster_summary", **{k: v for k, v in result.items() if k != "clusters"})
         typer.echo(json.dumps(result, indent=2, default=str))
+    finally:
+        store.close()
+
+
+@faces_app.command("corrections")
+def faces_corrections(
+    action: Annotated[
+        str | None,
+        typer.Option(help="filter by action: named | unassigned | deleted | verified | unverified"),
+    ] = None,
+    face_id: Annotated[int | None, typer.Option(help="filter by face_id")] = None,
+    limit: Annotated[int, typer.Option(help="cap rows printed")] = 200,
+) -> None:
+    """Dump the face_corrections audit log as JSON (most recent first)."""
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        rows = store.list_face_corrections(face_id=face_id, action=action)
+        typer.echo(json.dumps(rows[:limit], indent=2, default=str))
     finally:
         store.close()
 

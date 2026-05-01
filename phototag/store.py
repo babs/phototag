@@ -148,6 +148,18 @@ MIGRATIONS: list[str] = [
     -- of this name on this image" runs.
     ALTER TABLE faces ADD COLUMN user_verified INTEGER;
     """,
+    """
+    -- v8: tag.kind separates geo facts ("geo_v1" model) from model
+    -- predictions. NULL = legacy/label (RAM/CLIP). 'geo' = reverse-geocoded
+    -- city/country. The default search-by-tag scope filters to kind=label so
+    -- a city name doesn't drown a visual match with score=1.0.
+    ALTER TABLE tags ADD COLUMN kind TEXT;
+    UPDATE tags
+    SET kind = 'geo'
+    WHERE id IN (
+        SELECT DISTINCT tag_id FROM image_tags WHERE model_name = 'geo_v1'
+    );
+    """,
 ]
 
 
@@ -300,6 +312,11 @@ class Store:
         for row in cur:
             yield ImageRow(**dict(row))
 
+    def delete_image(self, image_id: int) -> None:
+        """Drop an image row. CASCADE removes tags / clusters / faces tied
+        to it. Embeddings on this image are also removed via the FK cascade."""
+        self.conn.execute("DELETE FROM images WHERE id=?", (image_id,))
+
     def update_image_exif(self, image_id: int, exif: dict[str, Any] | None) -> None:
         self.conn.execute(
             "UPDATE images SET exif_json=? WHERE id=?",
@@ -321,24 +338,31 @@ class Store:
 
     # ---- tags ----
 
-    def get_or_create_tag(self, name: str) -> int:
-        # ON CONFLICT branch is a no-op write that still triggers RETURNING so a
-        # racing INSERT from another writer cannot make this raise IntegrityError.
+    def get_or_create_tag(self, name: str, *, kind: str | None = None) -> int:
+        # ON CONFLICT branch upgrades the kind if it was previously NULL but
+        # never overwrites a non-NULL kind (so a label tag that later coincides
+        # with a city name doesn't get demoted to "geo" silently).
         cur = self.conn.execute(
-            "INSERT INTO tags(name) VALUES(?) "
-            "ON CONFLICT(name) DO UPDATE SET name=excluded.name RETURNING id",
-            (name,),
+            """
+            INSERT INTO tags(name, kind) VALUES(?, ?)
+            ON CONFLICT(name) DO UPDATE SET kind = COALESCE(tags.kind, excluded.kind)
+            RETURNING id
+            """,
+            (name, kind),
         )
         return int(cur.fetchone()["id"])
 
     def replace_image_tags(self, image_id: int, model_name: str, tags: Iterable[tuple[str, float]]) -> None:
+        # Tag.kind is derived from the model_name: any model whose name begins
+        # with "geo_" produces geo facts; everything else is a label/prediction.
+        kind = "geo" if model_name.startswith("geo_") else "label"
         self.conn.execute(
             "DELETE FROM image_tags WHERE image_id=? AND model_name=?",
             (image_id, model_name),
         )
         rows: list[tuple[int, int, float, str]] = []
         for name, score in tags:
-            rows.append((image_id, self.get_or_create_tag(name), float(score), model_name))
+            rows.append((image_id, self.get_or_create_tag(name, kind=kind), float(score), model_name))
         if rows:
             self.conn.executemany(
                 "INSERT OR IGNORE INTO image_tags(image_id,tag_id,score,model_name) VALUES(?,?,?,?)",
@@ -552,26 +576,41 @@ class Store:
         cur = self.conn.execute(sql, params)
         return [dict(r) for r in cur]
 
-    def list_tag_names(self, *, prefix: str | None = None, limit: int = 50) -> list[tuple[str, int]]:
+    def list_tag_names(
+        self,
+        *,
+        prefix: str | None = None,
+        limit: int = 50,
+        kind: str | None = None,
+        include_geo: bool = True,
+    ) -> list[tuple[str, int]]:
+        """List tag names + counts. By default includes both labels and geo
+        facts (back-compat). Pass `kind="label"` for ML predictions only,
+        `kind="geo"` for cities/countries only, or `include_geo=False` to
+        exclude geo from a label list while keeping NULL-kind legacy rows."""
+        clauses = []
+        params: list[Any] = []
         if prefix:
-            cur = self.conn.execute(
-                """
-                SELECT t.name, COUNT(*) AS n
-                FROM tags t JOIN image_tags it ON it.tag_id = t.id
-                WHERE t.name LIKE ?
-                GROUP BY t.name ORDER BY n DESC LIMIT ?
-                """,
-                (f"{prefix}%", limit),
-            )
-        else:
-            cur = self.conn.execute(
-                """
-                SELECT t.name, COUNT(*) AS n
-                FROM tags t JOIN image_tags it ON it.tag_id = t.id
-                GROUP BY t.name ORDER BY n DESC LIMIT ?
-                """,
-                (limit,),
-            )
+            clauses.append("t.name LIKE ?")
+            params.append(f"{prefix}%")
+        if kind is not None:
+            # NULL counts as "label" (legacy rows pre-v8 migration backfill).
+            if kind == "label":
+                clauses.append("(t.kind IS NULL OR t.kind = 'label')")
+            else:
+                clauses.append("t.kind = ?")
+                params.append(kind)
+        elif not include_geo:
+            clauses.append("(t.kind IS NULL OR t.kind != 'geo')")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (
+            "SELECT t.name, COUNT(*) AS n "
+            "FROM tags t JOIN image_tags it ON it.tag_id = t.id"
+            f"{where} "
+            "GROUP BY t.name ORDER BY n DESC LIMIT ?"
+        )
+        params.append(limit)
+        cur = self.conn.execute(sql, params)
         return [(r["name"], int(r["n"])) for r in cur]
 
     def list_image_tags(self, image_id: int, *, min_score: float = 0.0) -> list[tuple[str, float]]:

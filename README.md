@@ -58,6 +58,28 @@ uv run phototag faces purge [--keep-identities] --yes
 UI per-face shortcuts: V validate, G go-to-person, W wrong (un-cluster),
 D delete, X drop dups of this name. Per-image actions: bulk validate
 named faces, drop unidentified, re-detect (preserves validated faces).
+`?` opens the keyboard-shortcut help overlay.
+
+### v1.5 search & maintenance
+
+```sh
+uv run phototag list --tag cat --tag smile           # AND across tags
+uv run phototag stats --top 50 --kind label          # excludes geo
+uv run phototag query "x-ray of a hand" --limit 20   # CLIP semantic search
+uv run phototag export --format csv --out tags.csv
+uv run phototag prune --apply                        # drop rows for missing files
+```
+
+### Optional auth (when binding non-loopback)
+
+```sh
+APP_API_TOKEN=somethingsecret uv run phototag serve --host 0.0.0.0 --port 8090
+```
+
+When `APP_API_TOKEN` is set, every API request requires
+`X-API-Token: <value>` header (or `?token=<value>` query for native
+asset loads); the SPA wires this automatically from the rendered template.
+Empty / unset disables auth — fine for the localhost-only default.
 
 ## License
 

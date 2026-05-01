@@ -19,7 +19,12 @@ const state = {
 // EXIF-orientation fix) actually shows up; pinned per page-load so a normal
 // refresh evicts stale browser-cached images.
 const ASSET_VERSION = String(Date.now());
-const assetUrl = (kind, id) => `/${kind}/${id}?v=${ASSET_VERSION}`;
+// Optional shared-secret token (APP_API_TOKEN env). When non-empty, every
+// fetch carries an X-API-Token header and every <img> URL gets a ?token=
+// query string (browsers can't set headers on native asset loads).
+const API_TOKEN = (typeof window !== 'undefined' && window.PHOTOTAG_API_TOKEN) || '';
+const tokenQuery = (sep) => API_TOKEN ? `${sep}token=${encodeURIComponent(API_TOKEN)}` : '';
+const assetUrl = (kind, id) => `/${kind}/${id}?v=${ASSET_VERSION}${tokenQuery('&')}`;
 
 const $ = (id) => document.getElementById(id);
 const html = (s) => { const d = document.createElement('div'); d.innerHTML = s.trim(); return d.firstElementChild; };
@@ -30,6 +35,11 @@ async function api(path, opts) {
   // — without this, browsers happily serve a cached GET of /api/images/{id}/faces
   // and the user sees pre-mutation state ("wrong didn't unassign").
   const merged = Object.assign({ cache: 'no-store' }, opts || {});
+  if (API_TOKEN) {
+    const headers = new Headers(merged.headers || {});
+    headers.set('X-API-Token', API_TOKEN);
+    merged.headers = headers;
+  }
   const r = await fetch(path, merged);
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json();
@@ -948,6 +958,24 @@ $('tag-input').addEventListener('keydown', (e) => {
     e.target.blur();
   }
 });
+function toggleHelp() {
+  const o = $('help-overlay');
+  o.style.display = o.style.display === 'none' ? 'flex' : 'none';
+}
+window.toggleHelp = toggleHelp;
+
+// Global ? to open help, Esc to close it. Don't fire when typing into an input.
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  const tag = t && t.tagName;
+  const typing = tag === 'INPUT' || tag === 'TEXTAREA' || (t && t.isContentEditable);
+  const helpOpen = $('help-overlay').style.display !== 'none';
+  if (helpOpen && e.key === 'Escape') { e.preventDefault(); toggleHelp(); return; }
+  if (!typing && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
+    e.preventDefault(); toggleHelp(); return;
+  }
+});
+
 document.addEventListener('keydown', (e) => {
   const lightboxOpen = $('lightbox').classList.contains('show');
   const formOpen = $('face-name-form').style.display !== 'none';

@@ -494,6 +494,20 @@ def test_rename_clusters_skips_noise(client: TestClient, seeded_db: Path) -> Non
     s.close()
 
 
+def test_api_token_blocks_unauth(seeded_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When APP_API_TOKEN is set, non-public endpoints return 401 without a token."""
+    monkeypatch.setenv("APP_API_TOKEN", "s3cret")
+    app = create_app(db_path=seeded_db)
+    with TestClient(app) as c:
+        # public endpoints stay open
+        assert c.get("/healthz").status_code == 200
+        # protected endpoints require the token
+        assert c.get("/api/runs").status_code == 401
+        assert c.get("/api/runs", headers={"X-API-Token": "s3cret"}).status_code == 200
+        assert c.get("/api/runs?token=s3cret").status_code == 200
+        assert c.get("/api/runs?token=wrong").status_code == 401
+
+
 def test_corrections_logged_on_manual_name(client: TestClient, seeded_db: Path) -> None:
     s = Store(seeded_db)
     img_id = _image_id(s, "/tmp/b.jpg")

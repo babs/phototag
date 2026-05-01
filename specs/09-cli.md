@@ -33,20 +33,23 @@ phototag info IMAGE_PATH
 ## v1.5 — polish & search
 
 ```
-phototag query "TEXT" [--like IMAGE] [--tag T] [--cluster N] [--limit 50]
-phototag list  [--tag NAME] [--score-min 0.7] [--limit 100]
-phototag stats [--top 50]
-phototag export [--format json|csv] [--out FILE]
-phototag cluster rename --from rename.json
+phototag query "TEXT" [--limit 30] [--embedder NAME]
+phototag list  --tag NAME [--tag NAME] [--score-min 0.7] [--limit 100] [--format json|tsv]
+phototag stats [--top 50] [--kind label|geo]
+phototag export [--format json|csv] [--out FILE] [--min-score 0.0]
+phototag prune [--apply] [--limit N]
+phototag rename CLUSTER_ID [LABEL]
+phototag rename-bulk JSON_PATH
 ```
 
 | Command | Purpose |
 |---|---|
-| `query` | Semantic search by text or image |
-| `list` | Filter images by tag / score |
-| `stats` | Tag distribution, top N tags, image count |
+| `query` | Semantic search by text against cached CLIP embeddings |
+| `list` | Filter images by tag(s) / score |
+| `stats` | Tag distribution, top N, image + face counts |
 | `export` | Dump tags/metadata to JSON or CSV |
-| `cluster rename` | Bulk-set `label_user` from JSON map |
+| `prune` | Drop DB rows whose file is gone from disk (default dry-run) |
+| `rename` / `rename-bulk` | Bulk-set `clusters.label_user` |
 
 ## v2 — productivity
 

@@ -98,6 +98,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     settings = load_settings()
     setup_logging(log_level=settings.log_level, json_logs=settings.json_logs)
     db = db_path or settings.db_path
+    api_token = settings.api_token or None
     THUMB_CACHE.mkdir(parents=True, exist_ok=True)
     PREVIEW_CACHE.mkdir(parents=True, exist_ok=True)
     FACE_THUMB_CACHE.mkdir(parents=True, exist_ok=True)
@@ -139,6 +140,31 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     templates = Jinja2Templates(directory=str(project_root / "templates"))
     app.mount("/static", StaticFiles(directory=str(project_root / "static")), name="static")
 
+    if api_token:
+        # Lightweight shared-secret guard. Disabled by default (the local-
+        # loopback case). When set, every request except the index page,
+        # /healthz and /static/* must carry the token via either:
+        #   - X-API-Token header (preferred for fetch/XHR)
+        #   - ?token=<value> query string (so <img> loads work in the SPA)
+        # The token is also injected into the index template so the JS can
+        # read it and decorate fetch/asset URLs automatically.
+        from starlette.middleware.base import BaseHTTPMiddleware
+
+        _PUBLIC = ("/", "/healthz", "/static", "/favicon.ico")
+
+        class _AuthMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request: Request, call_next: Any) -> Any:
+                p = request.url.path
+                if p in _PUBLIC or p.startswith("/static/"):
+                    return await call_next(request)
+                got = request.headers.get("X-API-Token") or request.query_params.get("token")
+                if got != api_token:
+                    return Response(status_code=401, content="missing or wrong API token")
+                return await call_next(request)
+
+        app.add_middleware(_AuthMiddleware)
+        log.info("api_token_enabled")
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -154,7 +180,11 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         return templates.TemplateResponse(
             request,
             "ui.html",
-            {"title": "phototag", "version": int(_time())},
+            {
+                "title": "phototag",
+                "version": int(_time()),
+                "api_token": api_token or "",
+            },
             headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
         )
 
