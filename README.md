@@ -113,7 +113,7 @@ Live status table: [`specs/16-improvement-plan.md`](specs/16-improvement-plan.md
   Lightroom, darktable, Capture One can read the tags. Idempotent.
   Requires the `exiftool` system binary
   (`apt install libimage-exiftool-perl` / `brew install exiftool`).
-  Example: `uv run phototag xmp write ./data/photo-corpus --apply --include-people`.
+  Example: `uv run phototag xmp write ./data/pictures --apply --include-people`.
 - `phototag xmp clean PATH [--apply]` — remove every sidecar under
   PATH (default dry-run).
 
@@ -143,9 +143,9 @@ See [`GETTING_STARTED.md`](GETTING_STARTED.md) for the full TL;DR. The
 30-second version:
 
 ```sh
-ln -s /path/to/your/photos data/photo-corpus       # point at your library
+ln -s /path/to/your/photos data/pictures       # point at your library
 
-uv run phototag scan ./data/photo-corpus           # tag with RAM++
+uv run phototag scan ./data/pictures           # tag with RAM++
 uv run phototag embed                              # CLIP embeddings
 uv run phototag cluster --min-size 20              # UMAP + HDBSCAN
 uv run phototag report --out ./report              # static HTML

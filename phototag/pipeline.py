@@ -123,7 +123,7 @@ def scan_and_tag(
     else:
         to_decode = []
         for sf in files:
-            existing = store.get_image_by_path(str(sf.path))
+            existing = store.get_image_by_path(store.relative_path(sf.path))
             if existing is not None and existing.mtime == sf.mtime:
                 counts["skipped"] += 1
             else:
@@ -138,7 +138,7 @@ def scan_and_tag(
                 if img is None or content_hash is None:
                     counts["failed"] += 1
                     continue
-                spath = str(sf.path)
+                spath = store.relative_path(sf.path)
                 existing = store.get_image_by_path(spath)
                 if (
                     existing is not None
@@ -214,7 +214,7 @@ def embed_all(
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 for chunk_start in range(0, len(todo), batch_size):
                     chunk = todo[chunk_start : chunk_start + batch_size]
-                    decoded = list(ex.map(lambda r: (r.id, _open_image(Path(r.path))), chunk))
+                    decoded = list(ex.map(lambda r: (r.id, _open_image(store.absolute_path(r.path))), chunk))
                     q.put(decoded)
         except Exception as e:
             log.error("embed_decode_failed", error=str(e))

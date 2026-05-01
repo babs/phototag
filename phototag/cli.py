@@ -170,7 +170,12 @@ def prune(
 
         missing_ids: list[int] = []
         with ThreadPoolExecutor(max_workers=16) as ex:
-            results = list(ex.map(lambda r: (r.id, r.path, Path(r.path).exists()), rows))
+            results = list(
+                ex.map(
+                    lambda r: (r.id, r.path, store.absolute_path(r.path).exists()),
+                    rows,
+                )
+            )
         for image_id, path, present in results:
             if not present:
                 missing_ids.append(image_id)
@@ -639,7 +644,7 @@ def exif_backfill(
                     counts["skipped"] += 1
                     continue
                 try:
-                    exif = extract_exif(Path(r.path))
+                    exif = extract_exif(store.absolute_path(r.path))
                 except Exception as e:
                     log.warning("exif_extract_failed", path=r.path, error=str(e))
                     counts["failed"] += 1
@@ -1119,7 +1124,7 @@ def _collect_image_plans(
 
     plans: list[dict[str, Any]] = []
     for scanned in iter_images(path):
-        image_row = store.get_image_by_path(str(scanned.path))
+        image_row = store.get_image_by_path(store.relative_path(scanned.path))
         if image_row is None:
             continue
         tag_names = [name for name, _score in store.list_image_tags(image_row.id, min_score=threshold)]

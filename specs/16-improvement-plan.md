@@ -49,7 +49,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | 23 | Categories + tag/cluster mapping (v2 leftover) | ⬜ | 1 d | schema + CLI + UI mapping rules (see `08-xmp-categories.md`) |
 | 24 | CI pipeline | ⬜ | 4 h | GitHub Actions workflow: ruff + mypy + pytest -m "not slow"; nightly slow run |
 | 25 | JS bundling / module split | 🟢 | 1 d | source moved to `static/src/{state,api,lightbox,sidebar,workspace,keyboard,runs,main}.js`; esbuild bundles to `static/ui.js` (single ES2020 IIFE) via `make js-build` / `make js-watch`; `package.json` + `package-lock.json` committed, `node_modules/` gitignored; bundle output stays committed so the app works without running the bundler; `<script>` cache-buster `?v={{ version }}` unchanged. Fallback path when no bundler is installed: `make js-build` prints an install hint and exits non-zero — contributors run `npm install` once. |
-| 26 | Photo paths relative to the DB | ⬜ | 1 d | `images.path` today stores absolute paths (`/home/.../Pictures/IMG_001.jpg`), which means the DB can only be opened on the host that scanned it. Switch to paths *relative to a base directory* (the symlinked corpus root) and store the base in `meta(key='photo_root', value=…)`. Resolution is `Path(meta.photo_root) / images.path` everywhere a file is read (`prune`, `redetect-faces`, EXIF backfill, thumb / preview / raw / face-thumb endpoints, scanner skip-known check). The symlink itself moves: `data/photo-corpus/` → `data/pictures/` (shorter, friendlier). Pre-release: no migration story for legacy rows — the change ships with a fresh schema bump that wipes `images` rows; users re-run `phototag scan ./data/pictures`. |
+| 26 | Photo paths relative to the DB | 🟢 | 0.5 d | `images.path` now stores paths *relative to the DB's parent directory* (so `data/full.db` + `data/pictures/foo.jpg` → row `pictures/foo.jpg`); no extra `meta` key — anchor is implicit (`db_path.parent`). `Store.absolute_path(stored)` / `Store.relative_path(abs)` are the only entry points, and every reader (prune, redetect-faces, EXIF backfill, thumb/preview/raw/face-thumb endpoints, faces detect/embed pipelines, reporting) goes through them. Absolute strings still resolve unchanged for legacy rows / `/tmp` test paths. Symlink renamed `data/photo-corpus/` → `data/pictures/`. Pre-release migration was a one-shot SQL `UPDATE` (no schema bump). |
 
 ## What's already shipped (current state)
 
@@ -120,12 +120,12 @@ Six items remain (⬜ above) — listed by daily-flow ROI:
   Pairs with the now-shipped #22 XMP writer to populate the `lr:HierarchicalSubject`
   field.
 
-**Portability** (1 day):
-- **#26** — photo paths relative to the DB + rename `data/photo-corpus`
-  to `data/pictures`. Today every `images.path` is absolute; the DB only
-  works on the host that scanned it. Switch to `meta.photo_root` + a
-  relative `images.path` so a `data/` directory is movable. Pre-release:
-  no migration story — schema bump wipes images, user re-scans.
+**Portability** — *shipped*:
+- **#26** — photo paths now stored relative to the DB's parent directory
+  (no `meta.photo_root` needed; anchor is implicit). `data/photo-corpus`
+  symlink renamed to `data/pictures`. `Store.absolute_path()` /
+  `Store.relative_path()` are the canonical accessors; absolute strings
+  still resolve unchanged for legacy rows and tests using `/tmp`.
 
 **Bigger swing** (~2 days each):
 - **#7** — constrained HDBSCAN (tier-3 sticky). Semi-supervised cluster

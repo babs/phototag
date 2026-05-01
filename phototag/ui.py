@@ -524,7 +524,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         meta = s.get_image(image_id)
         if meta is None:
             raise HTTPException(status_code=404, detail="image not found")
-        src = Path(meta["path"])
+        src = s.absolute_path(meta["path"])
         if not src.exists():
             raise HTTPException(status_code=404, detail="file missing on disk")
         # Lazy global detector, kept on app.state so we don't reload weights per call.
@@ -846,7 +846,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="image not found")
         dst = cache_dir / f"{image_id}.jpg"
         if not dst.exists():
-            src = Path(meta["path"])
+            src = s.absolute_path(meta["path"])
             if not src.exists() or not _resized(src, dst, max_side, quality=quality):
                 raise HTTPException(status_code=404, detail="image not available")
         return FileResponse(dst, media_type="image/jpeg", headers=_CACHE_HEADERS)
@@ -865,7 +865,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         meta = s.get_image(image_id)
         if meta is None:
             raise HTTPException(status_code=404, detail="image not found")
-        src = Path(meta["path"])
+        src = s.absolute_path(meta["path"])
         if not src.exists():
             raise HTTPException(status_code=404, detail="file not found on disk")
         return FileResponse(src, headers=_CACHE_HEADERS)
@@ -1194,7 +1194,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             try:
                 from .faces import crop_face
 
-                with Image.open(meta["path"]) as src_img:
+                with Image.open(s.absolute_path(meta["path"])) as src_img:
                     cropped = crop_face(src_img, face["bbox"])
                     cropped.thumbnail((FACE_THUMB_SIZE, FACE_THUMB_SIZE))
                     # Atomic write — two concurrent face_thumb requests for

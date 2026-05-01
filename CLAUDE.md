@@ -20,7 +20,7 @@ If you have already started writing code without doing 1–3, **stop and re-do t
 - **Settings**: pydantic-settings, env prefix `APP_`, `.env` supported.
 - **Type hints**: modern only (`list[str]`, `str | None`). Never `List`, `Optional`.
 - **DB**: single SQLite file. WAL mode. Schema migrations numbered in `phototag/store.py`.
-- **Read-only corpus**: `data/photo-corpus/` is a symlink to the user's actual library. Never write inside it. Persist all derived state under `data/` or the DB.
+- **Read-only corpus**: `data/pictures/` is a symlink to the user's actual library. Never write inside it. Persist all derived state under `data/` or the DB. Image rows store paths *relative to the DB's parent directory* (e.g. `pictures/foo.jpg`); always go through `Store.absolute_path()` / `Store.relative_path()` instead of touching `images.path` directly.
 
 ## Commands
 

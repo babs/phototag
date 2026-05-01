@@ -56,7 +56,7 @@ def generate_report(store: Store, *, out_dir: Path, run_id: int | None = None) -
         members = store.cluster_members(c["id"], limit=THUMB_PER_CLUSTER)
         thumbs: list[dict[str, str]] = []
         for _img_id, src_path, _dist in members:
-            src = Path(src_path)
+            src = store.absolute_path(src_path)
             if not src.exists():
                 continue
             tname = _thumb_filename(src_path)

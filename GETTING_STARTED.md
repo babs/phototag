@@ -18,11 +18,11 @@ upstream once, ~5 GB).
 
 ## 2. Point at your photo library
 
-The repo treats `data/photo-corpus/` as your library. Symlink your
+The repo treats `data/pictures/` as your library. Symlink your
 folder once:
 
 ```sh
-ln -s /path/to/your/photos data/photo-corpus
+ln -s /path/to/your/photos data/pictures
 ```
 
 Everything `phototag` writes lives under `data/` and is gitignored.
@@ -30,7 +30,7 @@ Everything `phototag` writes lives under `data/` and is gitignored.
 ## 3. The discovery loop (v1)
 
 ```sh
-uv run phototag scan   ./data/photo-corpus     # walks, hashes, RAM++ tags
+uv run phototag scan   ./data/pictures     # walks, hashes, RAM++ tags
 uv run phototag embed                          # CLIP embeddings (per-image, cached)
 uv run phototag cluster --min-size 20          # UMAP+HDBSCAN over CLIP
 uv run phototag report --out ./report          # static HTML report
@@ -126,7 +126,7 @@ URLs from the rendered template.
 
 ```sh
 # I added new photos to the library
-uv run phototag scan ./data/photo-corpus && uv run phototag embed
+uv run phototag scan ./data/pictures && uv run phototag embed
 
 # I want to re-cluster after qualifying a chunk of faces
 uv run phototag faces refine-noise --persist           # picks up named identities, leaves named clusters alone

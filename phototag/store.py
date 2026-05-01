@@ -301,6 +301,39 @@ class Store:
 
     # ---- images ----
 
+    def absolute_path(self, stored: str) -> Path:
+        """Resolve a stored `images.path` to an absolute filesystem path.
+
+        Paths are stored relative to the DB's parent directory so a
+        `data/full.db` + `data/pictures/foo.jpg` pair is portable as a
+        whole. Absolute paths in the DB are returned untouched (legacy
+        rows + paths outside the corpus root, e.g. tests writing to
+        `/tmp/...`).
+        """
+        p = Path(stored)
+        if p.is_absolute():
+            return p
+        return self.db_path.parent / p
+
+    def relative_path(self, abs_path: Path) -> str:
+        """Inverse of absolute_path: convert a filesystem path to the
+        stored form. Falls back to the absolute string when `abs_path`
+        is outside the DB parent (caller should be aware: such rows
+        won't be portable but stay queryable).
+
+        Avoid `.resolve()` on `abs_path` — the corpus root is typically a
+        symlink (e.g. `data/pictures` → user's library) and resolving it
+        would yield a path outside `db_path.parent`, defeating the
+        relativization. We anchor on the DB parent (resolved once) and
+        keep the input as-is, only making it absolute if needed.
+        """
+        anchor = self.db_path.parent.resolve()
+        candidate = abs_path if abs_path.is_absolute() else abs_path.absolute()
+        try:
+            return str(candidate.relative_to(anchor))
+        except ValueError:
+            return str(abs_path)
+
     def get_image_by_path(self, path: str) -> ImageRow | None:
         row = self.conn.execute(
             "SELECT id,path,hash,mtime,width,height FROM images WHERE path=?",
