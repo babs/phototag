@@ -22,6 +22,11 @@ log = get_logger(__name__)
 
 MODEL_NAME = "insightface_buffalo_l_v1"
 EMBED_DIM = 512
+# Detection input is resized to this max side. Bboxes are stored in this same
+# coord space so they line up directly with the lightbox's /preview/{id} image
+# (which is also clamped to 1280 px). Faces smaller than ~30 px in this space
+# will be dropped by RetinaFace, which is fine for ~99 % of phone shots.
+DETECT_MAX_SIDE = 1280
 
 
 @dataclass(frozen=True)
@@ -67,8 +72,11 @@ class FaceDetector:
         return ["CPUExecutionProvider"]
 
     def detect(self, img: Image.Image) -> list[DetectedFace]:
-        # insightface expects BGR uint8.
+        # insightface expects BGR uint8. Resize first; on a 4 K JPEG this is
+        # ~4× faster end-to-end and keeps bboxes in the same coord space as
+        # the lightbox preview, so the overlay JS can use them as-is.
         rgb = ImageOps.exif_transpose(img).convert("RGB")
+        rgb.thumbnail((DETECT_MAX_SIDE, DETECT_MAX_SIDE))
         arr = np.array(rgb)[:, :, ::-1]  # RGB -> BGR
         faces = self.app.get(arr)
         out: list[DetectedFace] = []
@@ -323,8 +331,14 @@ def name_cluster(store: Store, cluster_id: int, name: str | None) -> None:
 
 
 def crop_face(img: Image.Image, bbox: list[int], *, margin: float = 0.25) -> Image.Image:
-    """Crop a face from an image with a margin, EXIF-corrected first."""
+    """Crop a face from an image with a margin, EXIF-corrected first.
+
+    Bboxes are stored in the detector's coord space (max side `DETECT_MAX_SIDE`).
+    The source image is resized to the same space before cropping so the
+    coordinates line up regardless of original resolution.
+    """
     src = ImageOps.exif_transpose(img).convert("RGB")
+    src.thumbnail((DETECT_MAX_SIDE, DETECT_MAX_SIDE))
     x, y, w, h = bbox
     mx, my = int(w * margin), int(h * margin)
     left = max(0, x - mx)

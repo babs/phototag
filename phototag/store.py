@@ -613,6 +613,25 @@ class Store:
     def count_faces(self) -> int:
         return int(self.conn.execute("SELECT COUNT(*) AS n FROM faces").fetchone()["n"])
 
+    def faces_summary(self) -> dict[str, int]:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS faces, COUNT(DISTINCT image_id) AS images FROM faces"
+        ).fetchone()
+        return {"faces": int(row["faces"]), "images": int(row["images"])}
+
+    def list_images_with_faces(self, *, limit: int = 300) -> list[dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT i.id, i.path, COUNT(f.id) AS face_count
+            FROM images i JOIN faces f ON f.image_id = i.id
+            GROUP BY i.id
+            ORDER BY face_count DESC, i.id
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(r) for r in cur]
+
     def create_face_run(self, params: dict[str, Any], created_at: str) -> int:
         cur = self.conn.execute(
             "INSERT INTO face_runs(created_at,params_json) VALUES(?,?) RETURNING id",

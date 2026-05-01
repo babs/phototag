@@ -69,6 +69,27 @@
   .filters .x { cursor: pointer; opacity: 0.6; }
   .filters .x:hover { opacity: 1; }
   details summary { cursor: pointer; padding: 4px 0; }
+  .view-btn {
+    display: block; width: 100%; text-align: left; padding: 5px 8px;
+    border: 1px solid var(--border); background: #fff; border-radius: 4px;
+    margin-bottom: 4px; cursor: pointer; font-size: 13px;
+  }
+  .view-btn:hover { background: var(--chip-bg); }
+  .view-btn.active { background: var(--chip-active); color: #fff; border-color: var(--chip-active); }
+  .face-card {
+    border: 1px solid var(--border); border-radius: 4px; overflow: hidden;
+    background: #fff; cursor: pointer; transition: transform 0.05s;
+    position: relative;
+  }
+  .face-card:hover { transform: translateY(-1px); border-color: var(--accent); }
+  .face-card img { width: 100%; height: 180px; object-fit: cover; display: block; }
+  .face-card .badge {
+    position: absolute; top: 4px; right: 4px;
+    background: rgba(0,0,0,0.65); color: #fff; padding: 2px 6px;
+    border-radius: 999px; font-size: 11px;
+  }
+  .face-card .name { padding: 4px 6px; font-size: 12px; color: var(--accent); font-weight: 600; }
+  .face-card.unnamed .name { color: var(--muted); font-weight: 400; font-style: italic; }
   /* face overlays in the lightbox */
   .face-layer { position: absolute; pointer-events: none; }
   .face-box {
@@ -156,8 +177,15 @@
       <h3>top tags</h3>
       <div class="tags" id="top-tags"></div>
     </div>
+    <div class="section">
+      <h3>views</h3>
+      <button class="view-btn active" id="view-clusters" data-view="clusters">clusters</button>
+      <button class="view-btn" id="view-faces" data-view="faces">
+        faces <span id="faces-count" style="opacity:0.7;font-size:11px;"></span>
+      </button>
+    </div>
     <div class="section" style="padding:0;">
-      <h3 style="padding:8px 10px 4px;">clusters</h3>
+      <h3 style="padding:8px 10px 4px;" id="cluster-pane-title">clusters</h3>
       <div id="cluster-list"></div>
     </div>
   </aside>
@@ -228,7 +256,16 @@ async function loadRuns() {
   sel.value = state.runId;
   await loadClusters();
   await loadTopTags();
+  await loadFacesSummary();
   await applyHashState(hashState);
+}
+
+async function loadFacesSummary() {
+  try {
+    const s = await api('/api/faces/summary');
+    if (s.images > 0) $('faces-count').textContent = `(${s.images} photos / ${s.faces} faces)`;
+    else $('faces-count').textContent = '(none yet)';
+  } catch (e) { /* faces feature not enabled */ }
 }
 
 async function loadClusters() {
@@ -484,11 +521,20 @@ function closeFaceNameForm() {
 async function saveFaceName() {
   if (!pendingFace) return;
   const name = $('face-name-input').value.trim();
-  if (!name || pendingFace.cluster_id == null) { closeFaceNameForm(); return; }
-  await api(`/api/people/${pendingFace.cluster_id}/name`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ name }),
-  });
+  if (!name) { closeFaceNameForm(); return; }
+  // Two paths: rename an existing cluster, or create a manual cluster on the fly
+  // (when face detection has run but face clustering hasn't yet).
+  const url = pendingFace.cluster_id != null
+    ? `/api/people/${pendingFace.cluster_id}/name`
+    : `/api/faces/${pendingFace.id}/name`;
+  try {
+    await api(url, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name }),
+    });
+  } catch (e) {
+    alert('save failed: ' + e.message);
+  }
   closeFaceNameForm();
   // Reload faces for current image so this overlay updates immediately.
   showCurrentLightbox();
@@ -746,6 +792,113 @@ toggleTag = async (name) => { await _origToggleTag(name); writeHash(); };
 $('clear-filters').addEventListener('click', writeHash);
 $('min-score').addEventListener('change', writeHash);
 $('run-select').addEventListener('change', writeHash);
+
+// ---- view switching: clusters vs faces ----------------------------------
+
+state.view = 'clusters';
+
+function switchView(view) {
+  state.view = view;
+  document.querySelectorAll('.view-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === view);
+  });
+  if (view === 'clusters') {
+    $('cluster-pane-title').textContent = 'clusters';
+    $('cluster-list').innerHTML = '';
+    if (state.clusters.length) renderClusters();
+    else loadClusters();
+  } else if (view === 'faces') {
+    showFacesPanel();
+  }
+  writeHash();
+}
+
+function renderClusters() {
+  const root = $('cluster-list');
+  root.innerHTML = '';
+  state.clusters.forEach(c => {
+    const isNoise = c.cluster_no === -1;
+    const userLabel = c.label_user ? `<span class="user-label">${escape(c.label_user)}</span>` : '';
+    const autoLabel = c.label_auto ? `<span class="auto-label">${escape(c.label_auto)}</span>` : '';
+    const row = html(`<div class="cluster-row ${isNoise ? 'noise' : ''}" data-id="${c.id}">
+      <div class="label">${userLabel}${userLabel && autoLabel ? '<br>' : ''}${autoLabel}</div>
+      <div class="size">${c.size}</div>
+    </div>`);
+    row.onclick = () => selectCluster(c.id);
+    root.appendChild(row);
+  });
+}
+
+async function showFacesPanel() {
+  // Sidebar list: face clusters (people) if any; otherwise just an empty message.
+  $('cluster-pane-title').textContent = 'people';
+  const root = $('cluster-list');
+  root.innerHTML = '<div class="empty" style="padding:12px;">loading…</div>';
+  let people = [];
+  try { people = await api('/api/people'); } catch (e) { people = []; }
+  root.innerHTML = '';
+  if (!people.length) {
+    root.appendChild(html(`<div class="empty" style="padding:12px;font-size:12px;">
+      no face clusters yet. run <code>phototag faces cluster</code> after detection.
+    </div>`));
+  } else {
+    people.forEach(p => {
+      const lbl = p.name
+        ? `<span class="user-label">${escape(p.name)}</span>`
+        : `<span class="auto-label">${escape(p.auto || `person ${p.cluster_no}`)}</span>`;
+      const row = html(`<div class="cluster-row" data-id="${p.cluster_id}">
+        <div class="label">${lbl}</div>
+        <div class="size">${p.size}</div>
+      </div>`);
+      row.onclick = () => showPersonInWorkspace(p.cluster_id);
+      root.appendChild(row);
+    });
+  }
+  // Workspace grid: all photos with at least one detected face.
+  await showFacesGrid();
+}
+
+async function showFacesGrid() {
+  const ws = $('workspace');
+  ws.innerHTML = '<div class="empty">loading…</div>';
+  const items = await api('/api/faces/images?limit=500');
+  ws.innerHTML = '';
+  ws.appendChild(html(`<h2>Photos with detected faces</h2>`));
+  ws.appendChild(html(`<div class="auto">${items.length} photos · sorted by face count</div>`));
+  if (!items.length) {
+    ws.appendChild(html('<div class="empty">no faces detected yet</div>'));
+    state.viewIds = [];
+    return;
+  }
+  const grid = html('<div class="grid"></div>');
+  items.forEach(it => {
+    const tile = makeTile(it.id, it.path, null);
+    const meta = tile.querySelector('.meta');
+    meta.innerHTML = `<b>${it.face_count}</b> · ${meta.textContent}`;
+    grid.appendChild(tile);
+  });
+  ws.appendChild(grid);
+  state.viewIds = items.map(it => it.id);
+}
+
+async function showPersonInWorkspace(clusterId) {
+  const ws = $('workspace');
+  ws.innerHTML = '<div class="empty">loading…</div>';
+  const data = await api(`/api/people/${clusterId}?limit=500`);
+  const seen = new Set(); const ids = [];
+  for (const m of data.members) if (!seen.has(m.image_id)) { seen.add(m.image_id); ids.push(m.image_id); }
+  ws.innerHTML = '';
+  ws.appendChild(html(`<h2>${escape(data.label_user || data.label_auto || `person ${data.cluster_no}`)}</h2>`));
+  ws.appendChild(html(`<div class="auto">${ids.length} photos · ${data.size} faces in cluster</div>`));
+  const grid = html('<div class="grid"></div>');
+  ids.forEach(id => grid.appendChild(makeTile(id, `image-${id}`, null)));
+  ws.appendChild(grid);
+  state.viewIds = ids;
+}
+
+document.querySelectorAll('.view-btn').forEach(b => {
+  b.onclick = () => switchView(b.dataset.view);
+});
 
 renderActiveFilters();
 loadRuns();

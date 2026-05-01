@@ -18,6 +18,7 @@ GET  /healthz                        → liveness
 from pathlib import Path
 from typing import Annotated, Any
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -210,6 +211,16 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             return "hsl(0, 0%, 70%)"
         return f"hsl({(cluster_id * 137) % 360}, 70%, 55%)"
 
+    @app.get("/api/faces/summary")
+    def api_faces_summary() -> dict[str, int]:
+        return _store(app).faces_summary()
+
+    @app.get("/api/faces/images")
+    def api_faces_images(
+        limit: Annotated[int, Query(ge=1, le=2000)] = 300,
+    ) -> list[dict[str, Any]]:
+        return _store(app).list_images_with_faces(limit=limit)
+
     @app.get("/api/images/{image_id}/faces")
     def api_image_faces(image_id: int) -> list[dict[str, Any]]:
         s = _store(app)
@@ -304,6 +315,79 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(e)) from e
         log.info("face_cluster_named", cluster_id=cluster_id, name=body.name)
         return {"ok": True, "cluster_id": cluster_id, "name": body.name}
+
+    @app.post("/api/faces/{face_id}/name")
+    def api_face_name(face_id: int, body: FaceNameRequest) -> dict[str, Any]:
+        """Name a face directly. Used when no clustering run exists yet.
+
+        Creates a single 'manual' face_run shared across all hand-named clusters,
+        groups same-name faces into one cluster, and updates the identity centroid
+        as a running mean so the next `phototag faces cluster` carries the name
+        forward to all visually similar faces.
+        """
+        s = _store(app)
+        face = s.get_face(face_id)
+        if face is None:
+            raise HTTPException(status_code=404, detail="face not found")
+        name = (body.name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name required")
+
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        from .faces import MODEL_NAME
+
+        # Locate or create the manual face_run.
+        row = s.conn.execute(
+            "SELECT id FROM face_runs WHERE json_extract(params_json,'$.manual') = 1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            run_id = int(row["id"])
+        else:
+            run_id = s.create_face_run(
+                {"manual": True, "model": MODEL_NAME},
+                _dt.now(UTC).isoformat(timespec="seconds"),
+            )
+
+        # Group same-name faces into one cluster within the manual run.
+        crow = s.conn.execute(
+            "SELECT id, size FROM face_clusters WHERE run_id=? AND label_user=?",
+            (run_id, name),
+        ).fetchone()
+        with s.transaction():
+            if crow:
+                cid = int(crow["id"])
+                s.assign_face_to_cluster(face_id, cid, distance=0.0)
+                s.conn.execute("UPDATE face_clusters SET size=size+1 WHERE id=?", (cid,))
+            else:
+                max_no_row = s.conn.execute(
+                    "SELECT IFNULL(MAX(cluster_no), -1) AS m FROM face_clusters WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()
+                cluster_no = int(max_no_row["m"]) + 1
+                cid = s.add_face_cluster(
+                    run_id=run_id,
+                    cluster_no=cluster_no,
+                    size=1,
+                    label_auto=name,
+                    label_user=name,
+                )
+                s.assign_face_to_cluster(face_id, cid, distance=0.0)
+
+            # Running-mean identity centroid so future cluster runs match.
+            emb_row = s.conn.execute("SELECT dim, embedding FROM faces WHERE id=?", (face_id,)).fetchone()
+            emb = np.frombuffer(emb_row["embedding"], dtype=np.float32, count=int(emb_row["dim"]))
+            existing = next((i for i in s.list_face_identities() if i["name"] == name), None)
+            if existing:
+                n0 = existing["n_samples"]
+                blended = (existing["centroid"] * n0 + emb) / (n0 + 1)
+                s.upsert_face_identity(name, blended.astype(np.float32, copy=False), n_samples=n0 + 1)
+            else:
+                s.upsert_face_identity(name, emb, n_samples=1)
+
+        log.info("face_named_manual", face_id=face_id, cluster_id=cid, name=name)
+        return {"ok": True, "face_id": face_id, "cluster_id": cid, "name": name}
 
     @app.get("/face-thumb/{face_id}")
     def face_thumb(face_id: int) -> FileResponse:
