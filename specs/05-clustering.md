@@ -28,20 +28,20 @@ Persist params + seeds in `cluster_runs.params_json` (see `03-data-model.md`).
 
 ## Automatic cluster naming
 
-Four methods combined, ordered by usefulness:
+Four methods were planned, ordered by usefulness:
 
-| # | Method | Principle | Cost | Output |
-|---|---|---|---|---|
-| A | **TF-IDF on RAM tags** | Tags frequent in cluster AND rare elsewhere | ~zero | `x-ray, bone, radiograph` |
-| B | **CLIP zero-shot on centroid** | Score centroid against candidate label bank | low | suggested main category |
-| C | **Visual inspection** | Grid of N photos closest to centroid | ~30 s/cluster, manual | final validation |
-| D | **BLIP-2 caption** (option) | Free description on 3–5 central photos | heavier | descriptive sentence |
+| # | Method | Principle | Cost | Output | Status |
+|---|---|---|---|---|---|
+| A | **TF-IDF on RAM tags** | Tags frequent in cluster AND rare elsewhere | ~zero | `x-ray, bone, radiograph` | **shipped** (`clustering._tfidf_labels`) |
+| B | **CLIP zero-shot on centroid** | Score centroid against candidate label bank | low | suggested main category | not implemented — A proved sufficient on the live corpus |
+| C | **Visual inspection** | Grid of N photos closest to centroid | ~30 s/cluster, manual | final validation | shipped via the HTML report + the FastAPI lightbox |
+| D | **BLIP-2 caption** (option) | Free description on 3–5 central photos | heavier | descriptive sentence | not implemented |
 
-**A is the core**: leverages already-computed RAM tags, zero extra inference. B and C validate. D only if A+B insufficient.
+**A is the core and what's actually shipped**: it leverages already-computed RAM tags, zero extra inference, and on the live corpus (~10k photos, 30+ clusters) the top-5 TF-IDF tags read as cluster names without further enrichment. B/D were the planned validators if A turned out weak; we never had to reach for them. If you want them back, they're independent additions to `clustering.cluster` after the HDBSCAN call.
 
-### Candidate label bank for B
+### Candidate label bank for B (deferred)
 
-Curated list of ~100 labels covering expected high-level categories: `landscape, portrait, food, document, screenshot, x-ray, mri, ultrasound, plant, animal, vehicle, building, …`. User-extendable via `--labels labels.txt`.
+Originally envisioned: a curated list of ~100 labels covering expected high-level categories (`landscape, portrait, food, document, screenshot, x-ray, mri, ultrasound, plant, animal, vehicle, building, …`), user-extendable via `--labels labels.txt`. Not built; mention it as the natural extension if A's noise-tolerance ever degrades.
 
 ## Output
 

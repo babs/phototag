@@ -65,7 +65,9 @@ CREATE TABLE image_clusters (
 );
 CREATE INDEX idx_image_clusters_cluster ON image_clusters(cluster_id);
 
--- v2 — face recognition (opt-in; see 15-faces.md)
+-- v2 — face recognition (opt-in; see 15-faces.md). Schema initially landed
+-- as v4; v5/v7 add per-face flags, v6 adds the audit trail, v8 segregates
+-- geo tags.
 CREATE TABLE faces (
     id           INTEGER PRIMARY KEY,
     image_id     INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
@@ -75,16 +77,29 @@ CREATE TABLE faces (
     dim          INTEGER NOT NULL,
     model_name   TEXT NOT NULL,
     landmarks_json TEXT,
-    verified     INTEGER                       -- v5: 1 passed / 0 suspect / NULL untested
+    verified       INTEGER,                    -- v5: 1 passed / 0 suspect / NULL untested
+                                               --     (set by `phototag faces verify`)
+    user_verified  INTEGER                     -- v7: 1 = user clicked validate;
+                                               --     attach helper auto-sets when sim>=0.7;
+                                               --     drives the green styling + dup-drop spare
 );
+
+-- v8: tag.kind separates geo facts (model_name LIKE 'geo_%') from model
+-- predictions. NULL = legacy/label, 'label' for ML predictions, 'geo' for
+-- reverse-geocoded. `phototag stats --kind label` excludes geo so a city
+-- name doesn't drown a visual match with score=1.0.
+ALTER TABLE tags ADD COLUMN kind TEXT;
+
 -- v6: audit trail of every user-driven correction. Survives the deletion of
 -- the face/image rows it describes (no FK on face_id/image_id on purpose).
 -- Wiped by `phototag faces purge` unless --keep-identities is set.
+-- `action` enum: 'named' | 'unassigned' | 'deleted' | 'verified' | 'unverified'.
+-- The tier-2 sticky pass uses 'unassigned' rows as cannot-link constraints.
 CREATE TABLE face_corrections (
     id          INTEGER PRIMARY KEY,
     face_id     INTEGER,
     image_id    INTEGER,
-    action      TEXT NOT NULL,                 -- 'named' | 'unassigned' | 'deleted'
+    action      TEXT NOT NULL,                 -- 'named' | 'unassigned' | 'deleted' | 'verified' | 'unverified'
     cluster_id  INTEGER,
     name        TEXT,
     created_at  TEXT NOT NULL

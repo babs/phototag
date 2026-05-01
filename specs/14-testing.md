@@ -69,29 +69,32 @@ CLI is exercised by integration tests via typer's `CliRunner`; no need for separ
 ## Current state
 
 Coverage is configured in `pyproject.toml` under `[tool.coverage.run]` (branch
-coverage; CLI + heavy ML modules omitted from the source set). `make test-cov`
-runs term-missing, html, and xml outputs.
+coverage; `phototag/__init__.py`, `phototag/models/ram.py`, `phototag/models/clip.py`
+omitted from the source set because they're heavy ML wrappers exercised only
+behind `slow` integration). `make test-cov` runs term-missing, html, and xml
+outputs.
 
-Test files in place:
+**83 tests** in place across 7 files (was 42 at v1):
 
 | file | what it covers |
 |---|---|
-| `tests/test_cli.py` | CLI smoke (`version`, `--help`) |
+| `tests/test_cli.py` | `version`, `--help`, `prune` dry-run + `--apply`, `list --tag`, `stats --kind`, `export json/csv` round-trip, `doctor` size-mismatch detect + `--fix`, `backup` atomic snapshot |
 | `tests/test_scanner.py` | `iter_images` extension filter, `hash_file` determinism |
-| `tests/test_store.py` | core schema migrations, image upsert, tags, embeddings |
-| `tests/test_store_faces.py` | face inserts, runs, clusters, identities, search by persons, group rename, cluster centroid, unassign, purge, delete-with-cluster-size-decrement |
+| `tests/test_store.py` | schema migrations, image upsert, tag round-trip, embedding round-trip, `delete_image` cascade through tags / faces / embeddings |
+| `tests/test_store_faces.py` | face inserts / runs / clusters / identities, search by persons, group rename, cluster centroid, unassign, purge, delete-with-cluster-size-decrement, `attach_face_to_best_identity` (success / no-match / dim-mismatch / margin / cannot-link / noise-detach), `auto_attach_orphans` (dry-run + persist + image_id-in-audit + cannot-link), edge gallery |
 | `tests/test_exif.py` | `_to_jsonable`, `_to_decimal`, `_parse_exif_dt`, full extract on a piexif-injected JPEG |
-| `tests/test_faces_verify.py` | heuristic `verify_faces` dry run + `--apply`, threshold tuning |
-| `tests/test_ui_api.py` | FastAPI TestClient over: healthz, runs, tags autocomplete, search by tag, search by person, image faces, manual face naming, group rename + split, by-name merged view, only_unnamed sidebar, delete face, drop-all-faces, corrections audit log |
+| `tests/test_faces_verify.py` | heuristic `verify_faces` dry-run + `--apply`, threshold tuning |
+| `tests/test_ui_api.py` | FastAPI `TestClient` — every endpoint: healthz, runs, tags autocomplete, search by tag / person, image faces, manual face naming (verify + auto-detach + cannot-link), group rename + split + merge, by-name merged view + edge view, only_unnamed sidebar, validate-named bulk + drop-dups, redetect IoU preservation, delete face, drop-all + drop-unidentified, corrections audit log, suggest top-K, lib-wide drop yes-required, rename skips noise, triage queue, `APP_API_TOKEN[_FILE]` middleware (constant-time compare + hot rotation) |
 
 Heavy paths still untested (covered by `slow` integration runs or manual):
 
 - `phototag/models/ram.py`, `phototag/models/clip.py` — exercised only when
-  `[ram]`/`[clip]` extras are installed and weights are downloaded.
-- `phototag/faces.py:detect_faces_all` — needs InsightFace + cv2.
-- `phototag/clustering.py`, `phototag/pipeline.py` — pending; will be added
-  with `FakeTagger`/`FakeEmbedder` fixtures so they run without GPU.
+  `[ram]` / `[clip]` extras are installed and weights are downloaded.
+- `phototag/faces.py:FaceDetector.detect` (RetinaFace + ArcFace inference) — needs InsightFace + onnxruntime.
+- `phototag/faces.py:cluster_faces` and `cluster_orphan_faces` — UMAP + HDBSCAN inside; `auto_attach_orphans` and `apply_sticky_corrections` are tested directly. A `FakeTagger` / `FakeEmbedder` fixture set is the natural way to exercise `pipeline.scan_and_tag` / `pipeline.embed_all` end-to-end without GPU; not yet built (escalation #L10 in the prior reviews; #6 in `16-improvement-plan.md` group "Performance / correctness" → backlog).
 - `phototag/reporting.py` — pending; needs sample image fixtures.
+- `phototag/pipeline.py` (orchestration) — same fixture story as clustering.
 
-CI: no GitHub Actions yet. `make test-cov` is the local entry point; the
-xml output is shaped for codecov.io upload when that lands.
+CI: no GitHub Actions yet (escalated as item #24 in `specs/16-improvement-plan.md`).
+`make test-cov` is the local entry point; the xml output is shaped for codecov.io
+upload when that lands.

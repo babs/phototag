@@ -67,13 +67,18 @@ phototag category map --cluster N --category C
 phototag category list
 phototag category apply
 
-phototag faces detect [--limit N] [--force] [--i-understand]
-phototag faces cluster [--min-size 3] [--min-samples 2]
-phototag faces verify [--min-score 0.65] [--min-area 1024] [--apply]
-phototag faces refine-noise [--min-size 3] [--min-samples 2] [--persist]
-phototag faces name CLUSTER_ID NAME
-phototag faces unname CLUSTER_ID
+phototag faces detect              [--limit N] [--force] [--i-understand]
+phototag faces cluster             [--min-size 3] [--min-samples 2]
+phototag faces verify              [--min-score 0.65] [--min-area 1024] [--apply]
+phototag faces refine-noise        [--min-size 3] [--min-samples 2] [--persist]
+phototag faces auto-attach         [--threshold 0.5] [--auto-verify-threshold 0.7]
+                                   [--limit N] [--persist]
+phototag faces name                CLUSTER_ID NAME
+phototag faces unname              CLUSTER_ID
 phototag faces clear-noise-labels
+phototag faces corrections         [--action ACT] [--face-id N] [--limit N]
+phototag faces corrections-compact [--apply]
+phototag faces stats
 phototag faces purge [--keep-identities] [--yes]
 phototag faces stats
 phototag faces report [--out report-faces/]
