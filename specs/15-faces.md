@@ -245,24 +245,33 @@ read it to seed soft constraints:
 | `unassigned` (face X removed from cluster Y) | cannot-link X with the centroid that becomes Y's successor |
 | `deleted` | not used (row is gone) |
 
-Constraints aren't applied yet — the log is currently informational. Future
-work plan, in order of cost:
+Constraints are applied at two tiers (tier-3 still pending). Plan, in
+order of cost:
 
-1. **Sticky-label post-pass** (cheap; ~1 day). After `cluster_faces` produces
-   new clusters, walk `face_corrections` and apply:
+1. **Sticky-label post-pass** (cheap; ~1 day) — *shipped*. After
+   `cluster_faces` produces new clusters, walk `face_corrections` and apply:
    - `named`: force `face_clusters.label_user = name` for any cluster
      containing this face; update the identity centroid with this face.
    - `unassigned`: if this face landed in a cluster whose identity matches
      the old (wrong) cluster's identity, reassign to noise (`cluster_no = -1`).
    This means user actions persist across re-clustering with no algorithm
    change. Lossy on edge cases but predictable.
-2. **Identity-bias scoring** (medium). When matching a new cluster to the
-   identity table, weight identities the user has confirmed via `named`
-   higher; weight identities the user has rejected via `unassigned` lower.
-3. **Constrained HDBSCAN** (heavy). Use a semi-supervised clusterer (e.g.
-   `constrained-clustering`) where `named` faces become must-links and
-   `unassigned` pairs become cannot-links. Best quality, more work, more
-   dependencies.
+2. **Hard-negative mining (tier-2 sticky labels)** — *shipped*. The
+   sticky pass parks the face in noise but the next attach pass can still
+   re-suggest the same wrong identity via cosine. Tier-2 closes that loop:
+   for every `unassigned` correction we look up the rejected cluster's
+   `label_user` and build a per-face *cannot-link* set. Both
+   `attach_face_to_best_identity` (per-face SQL via
+   `cannot_link_identities_for_face`) and `auto_attach_orphans` (bulk SQL
+   via `cannot_link_identities_for_faces`, materialized as a
+   `(N_orphans, N_idents)` boolean mask zeroed to `-inf`) skip those
+   identities, so the same wrong name can never win the argmax or count
+   toward the top-2 ambiguity check. The bulk path reports
+   `cannot_link_skipped` (count of forbidden (face, identity) pairs).
+3. **Constrained HDBSCAN (tier-3 sticky)** — *pending*. Use a
+   semi-supervised clusterer (e.g. `constrained-clustering`) where `named`
+   faces become must-links and `unassigned` pairs become cannot-links at
+   the clustering layer itself. Best quality, more work, more dependencies.
 
 The current corrections table is the substrate for any of these — actions
 already logged today are usable by the future pass.

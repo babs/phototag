@@ -13,7 +13,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | 2 | "Did you mean: …" top-K suggestions in popover | 🟢 | 1 h | `GET /api/faces/{id}/suggest?k=3` runs cosine vs identity centroids (vectorized); popover renders one-click chips that reuse the manual-name path (detach-from-noise + auto-validate) |
 | 3 | Bulk auto-attach orphan faces | 🟢 | 1 h | `phototag faces auto-attach [--persist]` + `POST /api/faces/auto-attach-orphans?dry_run=`; vectorized cosine matmul |
 | 4 | Per-identity threshold tuning | ⬜ | 4 h | track per-identity sim distribution; raise auto-validate threshold for high-variance identities (kids growing, etc.) |
-| 5 | Hard-negative mining from `face_corrections` (tier-2 sticky) | ⬜ | 4 h | `unassigned` rows penalize that identity for the same face on future passes; informs both `attach_face_to_best_identity` and `cluster_faces` |
+| 5 | Hard-negative mining from `face_corrections` (tier-2 sticky) | 🟢 | 4 h | `unassigned` rows build a per-face cannot-link set on the rejected cluster's `label_user`; both `attach_face_to_best_identity` and `auto_attach_orphans` skip those identities so the system never re-suggests a name the user already rejected for that face |
 | 6 | Identity merge / split UI | ⬜ | 1 h | `POST /api/face-identities/merge?from=&to=` blends centroids by sample count |
 | 7 | Constrained HDBSCAN (tier-3 sticky) | ⬜ | 2 d | semi-supervised clusterer with must-link / cannot-link constraints from `face_corrections`; new dependency (`constrained-clustering` or hand-rolled) |
 
