@@ -1617,8 +1617,41 @@ async function showPersonByName(name) {
   const cBadge = data.n_clusters > 1
     ? ` <span style="font-size:12px;color:var(--muted);">(${data.n_clusters} clusters)</span>`
     : '';
-  ws.appendChild(html(`<h2>👤 ${escape(name)} <button id="person-edit-toggle" class="pen-btn" title="edit">✏️</button>${cBadge}</h2>`));
+  ws.appendChild(html(`<h2>👤 ${escape(name)} <button id="person-edit-toggle" class="pen-btn" title="edit">✏️</button> <button id="person-fringe-toggle" class="pen-btn" title="show 9 most-uncertain faces">fringe</button>${cBadge}</h2>`));
   ws.appendChild(html(`<div class="auto">${data.n_photos} photos${data.n_clusters > 1 ? ` across ${data.n_clusters} clusters` : ''}</div>`));
+
+  // Fringe row (hidden by default): the N farthest-from-centroid faces of
+  // this person, across every cluster sharing the label. Click → lightbox.
+  const fringeRow = html('<div id="person-fringe" class="fringe-row" style="display:none;"></div>');
+  ws.appendChild(fringeRow);
+  let fringeLoaded = false;
+  $('person-fringe-toggle').addEventListener('click', async () => {
+    const row = $('person-fringe');
+    const showing = row.style.display !== 'none';
+    if (showing) { row.style.display = 'none'; return; }
+    row.style.display = 'flex';
+    if (fringeLoaded) return;
+    row.innerHTML = '<div class="empty">loading…</div>';
+    try {
+      const faces = await api(`/api/people/by-name/${encodeURIComponent(name)}/edge?limit=9`);
+      row.innerHTML = '';
+      if (!faces.length) {
+        row.appendChild(html('<div class="empty">no faces</div>'));
+      } else {
+        for (const f of faces) {
+          const cell = html(`<div class="fringe-cell">
+            <img loading="lazy" src="/face-thumb/${f.face_id}" alt="">
+            <div class="fringe-meta">d=${Number(f.distance).toFixed(2)}</div>
+          </div>`);
+          cell.addEventListener('click', () => openLightbox(f.image_id));
+          row.appendChild(cell);
+        }
+      }
+      fringeLoaded = true;
+    } catch (e) {
+      row.innerHTML = `<div class="empty">failed: ${escape(e.message)}</div>`;
+    }
+  });
 
   // Edit block (hidden by default): rename-all + split + clear.
   const editBlock = html(`<div id="person-edit" style="display:none; margin:8px 0 12px; padding:8px; background:#fff7ed; border-radius:4px;">
