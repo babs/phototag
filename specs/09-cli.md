@@ -39,6 +39,7 @@ phototag stats [--top 50] [--kind label|geo]
 phototag export [--format json|csv] [--out FILE] [--min-score 0.0]
 phototag prune [--apply] [--limit N]
 phototag doctor [--fix]
+phototag backup [--out PATH]
 phototag rename CLUSTER_ID [LABEL]
 phototag rename-bulk JSON_PATH
 ```
@@ -51,6 +52,7 @@ phototag rename-bulk JSON_PATH
 | `export` | Dump tags/metadata to JSON or CSV |
 | `prune` | Drop DB rows whose file is gone from disk (default dry-run) |
 | `doctor` | Health-check the DB; flag size mismatches, orphan identities, schema-version drift; `--fix` recomputes safe items |
+| `backup` | Create an SQLite snapshot of the DB (atomic, online; default dst `data/backups/phototag-<UTC-iso>.db`) |
 | `rename` / `rename-bulk` | Bulk-set `clusters.label_user` |
 
 ## v2 — productivity

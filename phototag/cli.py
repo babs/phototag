@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -187,6 +188,55 @@ def prune(
         typer.echo(json.dumps(payload, indent=2))
     finally:
         store.close()
+
+
+@app.command()
+def backup(
+    out: Annotated[
+        Path | None,
+        typer.Option(help="output snapshot path (default: data/backups/phototag-<UTC-iso>.db)"),
+    ] = None,
+) -> None:
+    """Create an atomic SQLite snapshot of the DB via the online-backup API.
+
+    Uses `sqlite3.Connection.backup()` on a fresh source connection so it
+    doesn't disturb Store's thread-local pool and works on a live DB.
+    Writes to `<dst>.tmp` then renames to `<dst>` so a crash leaves no
+    half-file at the final name.
+    """
+    import sqlite3
+    import time
+
+    settings = load_settings()
+    log = get_logger("phototag.backup")
+    if out is None:
+        ts = datetime.now(UTC).isoformat(timespec="seconds").replace(":", "-")
+        out = Path("data/backups") / f"phototag-{ts}.db"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    if tmp.exists():
+        tmp.unlink()
+    src_path = settings.db_path
+    t0 = time.monotonic()
+    src = sqlite3.connect(str(src_path))
+    try:
+        dst = sqlite3.connect(str(tmp))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    tmp.replace(out)
+    took_ms = int((time.monotonic() - t0) * 1000)
+    payload = {
+        "src": str(src_path),
+        "dst": str(out),
+        "bytes": out.stat().st_size,
+        "took_ms": took_ms,
+    }
+    log.info("backup_done", **payload)
+    typer.echo(json.dumps(payload, indent=2))
 
 
 @app.command(name="list")

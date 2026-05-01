@@ -43,7 +43,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 | # | Item | Status | Effort | Notes |
 |---|---|---|---|---|
 | 19 | `phototag doctor` health check | 🟢 | 4 h | walks DB, flags `face_clusters.size` / `clusters.size` mismatches, faces without embedding, orphan identities, schema_version drift; `--fix` recomputes the safe items |
-| 20 | `phototag backup` SQLite snapshot | ⬜ | 0.25 h | wraps `sqlite3 .backup` to `data/backups/<ts>.db`; cheap insurance before destructive ops |
+| 20 | `phototag backup` SQLite snapshot | 🟢 | 0.25 h | `phototag backup [--out PATH]` uses `sqlite3.Connection.backup` on a fresh source connection; atomic via `<dst>.tmp` → rename; default dst `data/backups/phototag-<UTC-iso>.db` |
 | 21 | Token rotation without restart | 🟢 | 0.25 h | `APP_API_TOKEN_FILE=` watched per request; lets the user rotate by editing the file |
 | 22 | XMP sidecar writer (v2 leftover) | ⬜ | 4 h | `phototag xmp write/clean` via exiftool subprocess; round-trip for digiKam / Lightroom |
 | 23 | Categories + tag/cluster mapping (v2 leftover) | ⬜ | 1 d | schema + CLI + UI mapping rules (see `08-xmp-categories.md`) |

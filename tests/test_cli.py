@@ -189,6 +189,32 @@ def test_faces_corrections_compact(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     s.close()
 
 
+def test_backup_creates_atomic_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`phototag backup` writes an atomic SQLite snapshot containing seeded rows."""
+    db = _seed_two_images(tmp_path)
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    snap = tmp_path / "snap.db"
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["backup", "--out", str(snap)])
+    assert result.exit_code == 0, result.output
+    payload = _last_json(result.stdout)
+    assert payload["dst"] == str(snap)
+    assert payload["src"] == str(db)
+    assert payload["bytes"] > 0
+    assert "took_ms" in payload
+    assert snap.exists()
+    assert snap.stat().st_size == payload["bytes"]
+    # No half-file left behind from the atomic-rename dance.
+    assert not snap.with_suffix(snap.suffix + ".tmp").exists()
+
+    # The snapshot is a working DB containing the seeded rows.
+    s = Store(snap)
+    rows = list(s.iter_images())
+    assert {r.path for r in rows} == {str(tmp_path / "real.jpg"), str(tmp_path / "b.jpg")}
+    s.close()
+
+
 def test_prune_dry_run_then_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`prune` flags missing-on-disk rows in dry-run; --apply deletes them."""
     db = tmp_path / "phototag.db"
