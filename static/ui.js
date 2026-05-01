@@ -188,7 +188,7 @@ async function showCurrentLightbox() {
   if (faces && faces.length > 0) {
     const op = state.facesVisible ? '1' : '0.5';
     facesActions.push(`<a href="#" id="info-toggle-faces" onclick="event.preventDefault(); toggleFaceOverlays();" style="color:#9cf; opacity:${op};">${faces.length} (F)aces</a>`);
-    facesActions.push(`<a href="#" onclick="event.preventDefault(); deleteAllFacesOnImage(${id});" style="color:#fca5a5;">drop ${faces.length}</a>`);
+    facesActions.push(`<a href="#" onclick="event.preventDefault(); deleteAllFacesOnImage(${id});" style="color:#fca5a5;">drop ${faces.length} face${faces.length === 1 ? '' : 's'}</a>`);
   }
   if (info.tags && info.tags.length > 0) {
     const op = state.tagsVisible ? '1' : '0.5';
