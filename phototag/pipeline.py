@@ -26,10 +26,12 @@ def _now_iso() -> str:
 
 
 def _open_image(path: Path) -> Image.Image | None:
+    """Decode + close-handle. See faces._open_image — same logic, kept here to
+    avoid an import cycle (pipeline → faces would pull insightface lazily)."""
     try:
-        img = Image.open(path)
-        img.load()
-        return img
+        with Image.open(path) as img:
+            img.load()
+            return img.copy()
     except Exception as e:
         log.warning("decode_failed", path=str(path), error=str(e))
         return None
@@ -75,6 +77,10 @@ def _prefetch_decoded_batches(
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 for batch_files in _batched(iter(files), batch_size):
                     q.put(list(ex.map(_decode_one, batch_files)))
+        except Exception as e:
+            # Without this, a decode/hash failure in the pool dies silently and
+            # the consumer reports "success" with bogus counts.
+            log.error("decode_pipeline_failed", error=str(e))
         finally:
             q.put(_END)
 
@@ -88,6 +94,8 @@ def _prefetch_decoded_batches(
             yield item  # type: ignore[misc]
     finally:
         t.join(timeout=5.0)
+        if t.is_alive():
+            log.warning("decode_producer_did_not_exit", timeout_s=5.0)
 
 
 def scan_and_tag(
@@ -208,6 +216,8 @@ def embed_all(
                     chunk = todo[chunk_start : chunk_start + batch_size]
                     decoded = list(ex.map(lambda r: (r.id, _open_image(Path(r.path))), chunk))
                     q.put(decoded)
+        except Exception as e:
+            log.error("embed_decode_failed", error=str(e))
         finally:
             q.put(_END)
 
@@ -239,5 +249,7 @@ def embed_all(
                     counts["embedded"] += 1
     finally:
         t.join(timeout=5.0)
+        if t.is_alive():
+            log.warning("embed_producer_did_not_exit", timeout_s=5.0)
     log.info("embed_completed", **counts)
     return counts

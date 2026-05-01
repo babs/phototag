@@ -151,23 +151,69 @@ GET    /api/people/by-name/{name}                 → merged person view (every
                                                     aggregate counts)
 GET    /api/people/by-name/{name}/clusters        → just the cluster rows
 POST   /api/people/by-name/{name}/rename          → rename every cluster of name
+                                                    (noise cluster is skipped)
 POST   /api/people/by-name/{name}/split           → suffix into "name 1", "name 2", …
 
 GET    /api/people/{cluster_id}                   → cluster detail + members
 POST   /api/people/{cluster_id}/name              → set/clear label_user
+                                                    (refused on noise cluster)
 POST   /api/faces/{face_id}/name                  → manual cluster, when no
-                                                    `phototag faces cluster` run
+                                                    `phototag faces cluster` run.
+                                                    Auto-detaches the face from
+                                                    any noise cluster and marks
+                                                    user_verified=1.
+
+POST   /api/faces/{face_id}/verify                → user_verified=1 + audit log
+POST   /api/faces/{face_id}/unverify              → user_verified=NULL + audit
 
 GET    /api/images/{id}/faces                     → faces on this image
+                                                    (now includes user_verified)
 DELETE /api/images/{id}/faces                     → drop all faces (e.g. crowd)
-POST   /api/images/{id}/redetect-faces            → re-run RetinaFace+ArcFace
+DELETE /api/images/{id}/faces/unidentified        → drop only un-named faces
+DELETE /api/images/{id}/faces/dups-of/{label}     → drop other un-validated
+       ?keep_face_id={id}                          faces with this name on this
+                                                    image (validated dups are
+                                                    spared)
+POST   /api/images/{id}/faces/validate-named      → bulk validate every named-
+                                                    but-not-yet-validated face
+POST   /api/images/{id}/redetect-faces            → re-run RetinaFace+ArcFace.
+                                                    Validated faces whose box
+                                                    overlaps a new detection
+                                                    (IoU ≥ 0.4) are preserved
+                                                    with their existing
+                                                    embedding; un-matched
+                                                    validated faces are dropped.
 
 DELETE /api/faces/{id}                            → false-positive removal
 POST   /api/faces/{id}/unassign                   → "wrong cluster" — drops the
-                                                    face's cluster row (face
-                                                    stays for re-clustering)
-GET    /api/faces/corrections                     → audit log: named / unassigned
-                                                    / deleted entries
+                                                    face's cluster row in the
+                                                    most recent run holding it
+                                                    (so noise-only members
+                                                    become true orphans)
+GET    /api/faces/corrections                     → audit log: named /
+                                                    unassigned / deleted /
+                                                    verified / unverified
+
+GET    /api/faces/unidentified/summary            → count of orphan/noise faces
+GET    /api/faces/unidentified/images             → photos containing ≥1 of them
+DELETE /api/faces/unidentified?yes=true           → library-wide drop
+                                                    (yes=true required)
+POST   /api/faces/clear-noise-labels              → wipe label_user from any
+                                                    noise cluster (recovery
+                                                    for the historic bug where
+                                                    naming noise mass-tagged
+                                                    its members)
+POST   /api/faces/recluster-orphan                → re-run UMAP+HDBSCAN on the
+       ?dry_run=true|false                          orphan/noise pool only.
+       &min_size=&min_samples=                      dry_run=true returns the
+                                                    proposed clustering and any
+                                                    identity matches without
+                                                    writing; dry_run=false
+                                                    persists a new face_run
+                                                    and detaches the orphan
+                                                    faces from prior clusters.
+                                                    Named clusters never
+                                                    touched.
 
 GET    /face-thumb/{face_id}                      → cropped face JPEG (cached)
 ```
@@ -251,7 +297,7 @@ This feature processes biometric data. Hard rules:
 2. **First-run prompt.** `phototag faces detect` requires `--i-understand` on the first run; persists a marker in `meta` table so subsequent runs don't re-prompt.
 3. **Local only.** Embeddings never leave the machine; no telemetry.
 4. **Disclosure file.** First run writes `data/FACES_README.md` documenting what's stored, why, and how to wipe it (`phototag faces purge`).
-5. **Wipe is total.** `phototag faces purge` drops every faces-related table; `--keep-identities` to keep names but drop embeddings.
+5. **Wipe is total.** `phototag faces purge` drops every faces-related row including `face_corrections`. `--keep-identities` keeps `face_identities` and the corrections audit trail but drops embeddings, clusters, runs, and assignments.
 6. **Don't process other people's libraries** without their consent. The README states this explicitly.
 
 ## CLI summary

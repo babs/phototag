@@ -72,8 +72,10 @@ def test_healthz(client: TestClient) -> None:
     assert r.json() == {"status": "ok"}
 
 
-def test_runs_empty_no_image_clusters(client: TestClient) -> None:
-    # No image clusters seeded → empty list.
+def test_runs_empty_when_only_face_run_exists(client: TestClient) -> None:
+    """`/api/runs` lists *image* cluster runs only; the seeded face_run must
+    not show up here. Guards against regressions that would join the wrong
+    table and surface face runs in the cluster picker."""
     r = client.get("/api/runs")
     assert r.status_code == 200
     assert r.json() == []
@@ -118,6 +120,16 @@ def _image_id(s: Store, path: str) -> int:
     row = s.get_image_by_path(path)
     assert row is not None
     return row.id
+
+
+def _add_face(s: Store, image_id: int, *, bbox: list[int] | None = None) -> int:
+    return s.insert_face(
+        image_id=image_id,
+        bbox=bbox or [10, 10, 30, 30],
+        det_score=0.9,
+        embedding=np.ones(512, dtype=np.float32),
+        model_name="m",
+    )
 
 
 def test_image_faces(client: TestClient, seeded_db: Path) -> None:
@@ -273,6 +285,213 @@ def test_corrections_logged_on_delete(client: TestClient, seeded_db: Path) -> No
     assert r.status_code == 200
     audit = client.get("/api/faces/corrections?action=deleted").json()
     assert any(c["face_id"] == face for c in audit)
+
+
+def test_naming_noise_cluster_refused(client: TestClient, seeded_db: Path) -> None:
+    """Naming a noise cluster (cluster_no=-1) must fail — it would mass-tag
+    every unrelated face in the noise bag. Clearing is still allowed."""
+    s = Store(seeded_db)
+    run = s.latest_face_run()
+    assert run is not None
+    noise = s.add_face_cluster(run_id=run, cluster_no=-1, size=10, label_auto="noise", label_user=None)
+    s.close()
+    r = client.post(f"/api/people/{noise}/name", json={"name": "Trap"})
+    assert r.status_code == 400
+    # Clearing (None) must still succeed.
+    r = client.post(f"/api/people/{noise}/name", json={"name": None})
+    assert r.status_code == 200
+
+
+def test_clear_noise_labels(client: TestClient, seeded_db: Path) -> None:
+    s = Store(seeded_db)
+    run = s.latest_face_run()
+    assert run is not None
+    # Force a noise cluster to carry a (historically-buggy) label.
+    noise = s.add_face_cluster(run_id=run, cluster_no=-1, size=5, label_auto="noise", label_user=None)
+    s.conn.execute("UPDATE face_clusters SET label_user='Alex' WHERE id=?", (noise,))
+    s.close()
+    r = client.post("/api/faces/clear-noise-labels", json={})
+    assert r.status_code == 200
+    assert r.json()["cleared"] == 1
+    s = Store(seeded_db)
+    row = s.conn.execute("SELECT label_user FROM face_clusters WHERE id=?", (noise,)).fetchone()
+    assert row["label_user"] is None
+    s.close()
+
+
+def test_face_verify_and_drop_dups(client: TestClient, seeded_db: Path) -> None:
+    """User can verify one Alex face on a photo and drop the other dups."""
+    s = Store(seeded_db)
+    run = s.latest_face_run()
+    assert run is not None
+    img_id = _image_id(s, "/tmp/a.jpg")
+    # Add two more faces on the same image, both labelled Anne (the seeded one
+    # is also labelled Anne via the seed fixture).
+    cid = s.add_face_cluster(run_id=run, cluster_no=2, size=2, label_auto=None, label_user="Anne")
+    f2 = _add_face(s, img_id, bbox=[60, 60, 30, 30])
+    f3 = _add_face(s, img_id, bbox=[100, 100, 30, 30])
+    s.assign_face_to_cluster(f2, cid, 0.0)
+    s.assign_face_to_cluster(f3, cid, 0.0)
+    s.close()
+    # Verify f2 (the "good" one).
+    r = client.post(f"/api/faces/{f2}/verify", json={})
+    assert r.status_code == 200
+    # Drop the other two Annes on this image, keep f2.
+    r = client.delete(f"/api/images/{img_id}/faces/dups-of/Anne?keep_face_id={f2}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] >= 1
+    s = Store(seeded_db)
+    remaining = [f for f in s.list_faces_for_image(img_id) if f.get("label_user") == "Anne"]
+    assert any(f["id"] == f2 for f in remaining)
+    s.close()
+
+
+def test_manual_name_detaches_from_noise(client: TestClient, seeded_db: Path) -> None:
+    """Naming a noise-cluster face must drop its noise assignment so the noise
+    cluster size is correct and the face leaves the unidentified pool."""
+    s = Store(seeded_db)
+    run = s.latest_face_run()
+    assert run is not None
+    img_id = _image_id(s, "/tmp/b.jpg")
+    noise_cid = s.add_face_cluster(run_id=run, cluster_no=-1, size=1, label_auto="noise", label_user=None)
+    f = _add_face(s, img_id, bbox=[2, 2, 30, 30])
+    s.assign_face_to_cluster(f, noise_cid, 0.0)
+    s.close()
+    r = client.post(f"/api/faces/{f}/name", json={"name": "Carlos"})
+    assert r.status_code == 200, r.text
+    s = Store(seeded_db)
+    # Noise size decremented; face is no longer assigned to noise.
+    noise = s.get_face_cluster(noise_cid)
+    assert noise is not None
+    assert noise["size"] == 0
+    rows = s.conn.execute("SELECT cluster_id FROM face_cluster_assignments WHERE face_id=?", (f,)).fetchall()
+    cluster_ids = {int(r["cluster_id"]) for r in rows}
+    assert noise_cid not in cluster_ids
+    s.close()
+
+
+def test_unidentified_images_excludes_named(client: TestClient, seeded_db: Path) -> None:
+    """`/api/faces/unidentified/images` returns photos that still have at least
+    one unidentified face. The seeded /tmp/a.jpg has a named face — it must
+    not appear unless we add an unidentified face on top."""
+    s = Store(seeded_db)
+    img_a = _image_id(s, "/tmp/a.jpg")
+    s.close()
+    r = client.get("/api/faces/unidentified/images")
+    assert r.status_code == 200
+    paths = {x["path"] for x in r.json()}
+    assert "/tmp/a.jpg" not in paths
+    # Add an unclustered face on /tmp/a.jpg → now it shows up.
+    s = Store(seeded_db)
+    _add_face(s, img_a, bbox=[80, 80, 30, 30])
+    s.close()
+    r = client.get("/api/faces/unidentified/images")
+    paths = {x["path"] for x in r.json()}
+    assert "/tmp/a.jpg" in paths
+
+
+def test_unidentified_summary(client: TestClient, seeded_db: Path) -> None:
+    s = Store(seeded_db)
+    img = _image_id(s, "/tmp/b.jpg")
+    _add_face(s, img)  # unclustered face → unidentified
+    s.close()
+    r = client.get("/api/faces/unidentified/summary")
+    assert r.status_code == 200
+    assert r.json()["unidentified"] >= 1
+
+
+def test_verify_and_unverify_round_trip(client: TestClient, seeded_db: Path) -> None:
+    s = Store(seeded_db)
+    img_id = _image_id(s, "/tmp/a.jpg")
+    face = s.list_faces_for_image(img_id)[0]["id"]
+    s.close()
+    r = client.post(f"/api/faces/{face}/verify", json={})
+    assert r.status_code == 200
+    assert r.json()["user_verified"] == 1
+    s = Store(seeded_db)
+    row = s.conn.execute("SELECT user_verified FROM faces WHERE id=?", (face,)).fetchone()
+    assert row["user_verified"] == 1
+    s.close()
+    r = client.post(f"/api/faces/{face}/unverify", json={})
+    assert r.status_code == 200
+    s = Store(seeded_db)
+    row = s.conn.execute("SELECT user_verified FROM faces WHERE id=?", (face,)).fetchone()
+    assert row["user_verified"] is None
+    audit = client.get("/api/faces/corrections?action=unverified").json()
+    assert any(c["face_id"] == face for c in audit)
+    s.close()
+
+
+def test_validate_named_bulk(client: TestClient, seeded_db: Path) -> None:
+    """All named-but-not-yet-validated faces on an image flip to validated."""
+    s = Store(seeded_db)
+    img_id = _image_id(s, "/tmp/a.jpg")
+    # Seed: img already has 1 named (Anne) face. Add 1 more named, 1 unnamed.
+    run = s.latest_face_run()
+    assert run is not None
+    cid = s.add_face_cluster(run_id=run, cluster_no=10, size=1, label_auto=None, label_user="Bob")
+    f_named = _add_face(s, img_id, bbox=[10, 10, 20, 20])
+    s.assign_face_to_cluster(f_named, cid, 0.0)
+    f_orphan = _add_face(s, img_id, bbox=[40, 40, 20, 20])  # no cluster
+    s.close()
+    r = client.post(f"/api/images/{img_id}/faces/validate-named", json={})
+    assert r.status_code == 200
+    assert r.json()["validated"] == 2  # the seeded Anne + the new Bob
+    s = Store(seeded_db)
+    row = s.conn.execute("SELECT user_verified FROM faces WHERE id=?", (f_named,)).fetchone()
+    assert row["user_verified"] == 1
+    # orphan stays untouched
+    row = s.conn.execute("SELECT user_verified FROM faces WHERE id=?", (f_orphan,)).fetchone()
+    assert row["user_verified"] is None
+    s.close()
+
+
+def test_drop_dups_preserves_validated_others(client: TestClient, seeded_db: Path) -> None:
+    """Drop-dups must spare other user_verified faces, not just keep_face_id."""
+    s = Store(seeded_db)
+    run = s.latest_face_run()
+    assert run is not None
+    img_id = _image_id(s, "/tmp/a.jpg")
+    cid = s.add_face_cluster(run_id=run, cluster_no=20, size=3, label_auto=None, label_user="Anne")
+    f2 = _add_face(s, img_id, bbox=[60, 60, 30, 30])
+    f3 = _add_face(s, img_id, bbox=[100, 100, 30, 30])  # validated dup (montage)
+    s.assign_face_to_cluster(f2, cid, 0.0)
+    s.assign_face_to_cluster(f3, cid, 0.0)
+    s.set_face_user_verified(f3, 1)
+    s.close()
+    r = client.delete(f"/api/images/{img_id}/faces/dups-of/Anne?keep_face_id={f2}")
+    assert r.status_code == 200
+    s = Store(seeded_db)
+    surviving = {f["id"] for f in s.list_faces_for_image(img_id) if f.get("label_user") == "Anne"}
+    assert f2 in surviving
+    assert f3 in surviving  # was protected by user_verified=1
+    s.close()
+
+
+def test_lib_wide_unidentified_delete_requires_yes(client: TestClient) -> None:
+    r = client.delete("/api/faces/unidentified")
+    assert r.status_code == 400
+    r = client.delete("/api/faces/unidentified?yes=true")
+    assert r.status_code == 200
+
+
+def test_rename_clusters_skips_noise(client: TestClient, seeded_db: Path) -> None:
+    """Bulk rename via /api/people/by-name/{name}/rename must not re-label
+    a noise cluster even if it currently shares the name."""
+    s = Store(seeded_db)
+    run = s.latest_face_run()
+    assert run is not None
+    noise = s.add_face_cluster(run_id=run, cluster_no=-1, size=1, label_auto="noise", label_user=None)
+    # Force a stale label on the noise row (legacy data shape).
+    s.conn.execute("UPDATE face_clusters SET label_user='Anne' WHERE id=?", (noise,))
+    s.close()
+    r = client.post("/api/people/by-name/Anne/rename", json={"name": "Lee"})
+    assert r.status_code == 200
+    s = Store(seeded_db)
+    row = s.conn.execute("SELECT label_user FROM face_clusters WHERE id=?", (noise,)).fetchone()
+    assert row["label_user"] == "Anne"  # noise was NOT renamed
+    s.close()
 
 
 def test_corrections_logged_on_manual_name(client: TestClient, seeded_db: Path) -> None:

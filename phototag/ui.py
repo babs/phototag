@@ -15,6 +15,13 @@ GET  /raw/{id}                       → raw image file
 GET  /healthz                        → liveness
 """
 
+import os
+import secrets
+import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC
+from datetime import datetime as _dt
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -28,6 +35,7 @@ from PIL import Image, ImageOps
 from pydantic import BaseModel
 from starlette.requests import Request
 
+from .faces import cluster_color
 from .logging import get_logger, setup_logging
 from .settings import load as load_settings
 from .store import Store
@@ -56,6 +64,21 @@ def _store(app: FastAPI) -> Store:
     return s  # type: ignore[no-any-return]
 
 
+def _atomic_write_jpeg(dst: Path, save_fn: Any) -> None:
+    """Write a JPEG via tmp + os.replace so concurrent readers never see a
+    partial file. `save_fn(path)` is called with the temp path."""
+    from contextlib import suppress
+
+    tmp = dst.with_name(f".{dst.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        save_fn(tmp)
+        os.replace(tmp, dst)
+    except Exception:
+        with suppress(FileNotFoundError):
+            tmp.unlink()
+        raise
+
+
 def _resized(src: Path, dst: Path, max_side: int, *, quality: int = 82) -> bool:
     try:
         with Image.open(src) as img:
@@ -63,8 +86,8 @@ def _resized(src: Path, dst: Path, max_side: int, *, quality: int = 82) -> bool:
             # bytes match the visual orientation. Strip-on-save means we must bake
             # the rotation into the pixels here, not rely on EXIF later.
             rgb = ImageOps.exif_transpose(img).convert("RGB")
-            rgb.thumbnail((max_side, max_side))
-            rgb.save(dst, format="JPEG", quality=quality)
+            rgb.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            _atomic_write_jpeg(dst, lambda p: rgb.save(p, format="JPEG", quality=quality))
         return True
     except Exception as e:
         log.warning("resize_failed", src=str(src), max_side=max_side, error=str(e))
@@ -79,28 +102,36 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     PREVIEW_CACHE.mkdir(parents=True, exist_ok=True)
     FACE_THUMB_CACHE.mkdir(parents=True, exist_ok=True)
 
-    app = FastAPI(title="phototag UI")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.store = Store(db)
+        app.state.face_detector = None
+        app.state.face_detector_lock = threading.Lock()
+        log.info("ui_started", db=str(db))
+        try:
+            yield
+        finally:
+            s = getattr(app.state, "store", None)
+            if s is not None:
+                s.close()
+
+    app = FastAPI(title="phototag UI", lifespan=lifespan)
+    # Restrict CORS: this UI is local-only by design (default bind 127.0.0.1).
+    # Allowing `*` plus DELETE/POST mutations would let any browser tab hit the
+    # API when the user runs --host 0.0.0.0 (see /serve in cli.py).
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=[
+            "http://127.0.0.1:8000",
+            "http://localhost:8000",
+        ],
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type"],
     )
 
     project_root = Path(__file__).resolve().parent.parent
     templates = Jinja2Templates(directory=str(project_root / "templates"))
     app.mount("/static", StaticFiles(directory=str(project_root / "static")), name="static")
-
-    @app.on_event("startup")
-    def _open_store() -> None:
-        app.state.store = Store(db)
-        log.info("ui_started", db=str(db))
-
-    @app.on_event("shutdown")
-    def _close_store() -> None:
-        s = getattr(app.state, "store", None)
-        if s is not None:
-            s.close()
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -264,9 +295,98 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         log.info("image_faces_deleted", image_id=image_id, deleted=n)
         return {"deleted": n, "image_id": image_id}
 
+    @app.delete("/api/images/{image_id}/faces/unidentified")
+    def api_delete_image_unidentified_faces(image_id: int) -> dict[str, Any]:
+        """Drop only faces that have no user-assigned name on this image.
+
+        Useful after detection: keeps named faces, removes the noisy
+        "person N"/no-name detections.
+        """
+        s = _store(app)
+        if s.get_image(image_id) is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        with s.transaction():
+            n = s.delete_unidentified_faces_for_image(image_id)
+        log.info("image_unidentified_faces_deleted", image_id=image_id, deleted=n)
+        return {"deleted": n, "image_id": image_id}
+
+    @app.delete("/api/faces/unidentified")
+    def api_delete_all_unidentified_faces(yes: bool = False) -> dict[str, Any]:
+        """Library-wide: drop every face that has no user-assigned name.
+
+        Requires `?yes=true` so a stray cURL or accidental request doesn't
+        wipe thousands of rows. UI sends it explicitly after `confirm()`.
+        """
+        if not yes:
+            raise HTTPException(
+                status_code=400,
+                detail="library-wide delete requires ?yes=true",
+            )
+        s = _store(app)
+        with s.transaction():
+            n = s.delete_all_unidentified_faces()
+        log.info("all_unidentified_faces_deleted", deleted=n)
+        return {"deleted": n}
+
+    @app.get("/api/faces/unidentified/summary")
+    def api_unidentified_summary() -> dict[str, int]:
+        return {"unidentified": _store(app).count_unidentified_faces()}
+
+    @app.get("/api/faces/unidentified/images")
+    def api_unidentified_images(
+        limit: Annotated[int, Query(ge=1, le=2000)] = 500,
+    ) -> list[dict[str, Any]]:
+        """Photos containing at least one unidentified face.
+
+        face_count is the *unidentified* count for that photo, not the total."""
+        return _store(app).list_images_with_unidentified_faces(limit=limit)
+
+    @app.post("/api/faces/recluster-orphan")
+    def api_recluster_orphan(
+        min_size: int = 3,
+        min_samples: int = 2,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Re-cluster orphan/noise faces. Default dry_run=true so a curl
+        call without flags can preview without writing. Pass `dry_run=false`
+        to persist a new face_run."""
+        from .faces import cluster_orphan_faces
+
+        result = cluster_orphan_faces(
+            _store(app),
+            min_cluster_size=min_size,
+            min_samples=min_samples,
+            dry_run=dry_run,
+        )
+        log.info(
+            "orphan_recluster",
+            dry_run=dry_run,
+            n_orphan=result.get("n_orphan"),
+            n_clusters=result.get("n_clusters"),
+            named=result.get("named_via_identity"),
+        )
+        return result
+
+    @app.post("/api/faces/clear-noise-labels")
+    def api_clear_noise_labels() -> dict[str, int]:
+        """One-shot fix for the bug where users named the noise cluster (which
+        groups unrelated faces) and propagated the label to dozens of faces."""
+        s = _store(app)
+        with s.transaction():
+            n = s.clear_noise_cluster_labels()
+        log.info("noise_labels_cleared", rows=n)
+        return {"cleared": n}
+
     @app.post("/api/images/{image_id}/redetect-faces")
     def api_redetect_faces(image_id: int) -> dict[str, Any]:
-        """Re-run face detection on a single image. Replaces any existing faces."""
+        """Re-run face detection on a single image.
+
+        Validated faces (`user_verified=1`) are preserved when a freshly-
+        detected box overlaps their stored bbox (IoU >= 0.4 — same coord
+        space, since both are stored at DETECT_MAX_SIDE). A validated face
+        whose position is no longer detected is dropped (the user can re-
+        validate the new candidate). Non-validated faces are always replaced.
+        """
         from PIL import Image as _Image
 
         from .faces import MODEL_NAME, FaceDetector
@@ -279,21 +399,71 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         if not src.exists():
             raise HTTPException(status_code=404, detail="file missing on disk")
         # Lazy global detector, kept on app.state so we don't reload weights per call.
-        det = getattr(app.state, "face_detector", None)
+        # The lock prevents two concurrent requests from both loading ~200 MB of
+        # weights into RAM (and possibly OOMing) on the first call.
+        det = app.state.face_detector
         if det is None:
-            settings = load_settings()
-            det = FaceDetector(settings.models_dir, device=settings.device)
-            app.state.face_detector = det
+            with app.state.face_detector_lock:
+                det = app.state.face_detector
+                if det is None:
+                    settings = load_settings()
+                    det = FaceDetector(settings.models_dir, device=settings.device)
+                    app.state.face_detector = det
         try:
             with _Image.open(src) as img:
                 img.load()
-                faces = det.detect(img)
+                new_faces = det.detect(img)
         except Exception as e:
             log.error("face_redetect_failed", path=str(src), error=str(e))
             raise HTTPException(status_code=500, detail=f"detect failed: {e}") from e
+
+        def _iou(a: list[int], b: list[int]) -> float:
+            ax, ay, aw, ah = a
+            bx, by, bw, bh = b
+            ix1, iy1 = max(ax, bx), max(ay, by)
+            ix2, iy2 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+            iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+            inter = iw * ih
+            if inter <= 0:
+                return 0.0
+            union = aw * ah + bw * bh - inter
+            return inter / union if union > 0 else 0.0
+
+        IOU_KEEP = 0.4
+        validated = s.list_user_verified_faces_for_image(image_id)
+        # Largest-area first: greedy assignment is robust enough when the
+        # biggest face claims its match before close-together small faces
+        # (kid on a parent's lap, group photo) compete.
+        validated_sorted = sorted(
+            (v for v in validated if v["bbox"] and len(v["bbox"]) == 4),
+            key=lambda v: -(int(v["bbox"][2]) * int(v["bbox"][3])),
+        )
+        keep_validated: set[int] = set()
+        consumed_new: set[int] = set()
+        for v in validated_sorted:
+            best, best_iou = -1, 0.0
+            for j, nf in enumerate(new_faces):
+                if j in consumed_new:
+                    continue
+                iou = _iou(v["bbox"], nf.bbox)
+                if iou > best_iou:
+                    best, best_iou = j, iou
+            if best >= 0 and best_iou >= IOU_KEEP:
+                keep_validated.add(int(v["id"]))
+                consumed_new.add(best)
+
         with s.transaction():
-            s.delete_all_faces_for_image(image_id)
-            for f in faces:
+            # Drop every non-validated face first.
+            s.delete_non_verified_faces_for_image(image_id, MODEL_NAME)
+            # Drop validated faces whose position is no longer detected.
+            for v in validated:
+                if int(v["id"]) not in keep_validated:
+                    s.delete_face(int(v["id"]))
+            # Insert new detections that did NOT match a kept validated face.
+            inserted = 0
+            for j, f in enumerate(new_faces):
+                if j in consumed_new:
+                    continue
                 s.insert_face(
                     image_id=image_id,
                     bbox=f.bbox,
@@ -302,8 +472,86 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     model_name=MODEL_NAME,
                     landmarks=f.landmarks,
                 )
-        log.info("face_redetected", image_id=image_id, faces=len(faces))
-        return {"image_id": image_id, "faces": len(faces)}
+                inserted += 1
+        log.info(
+            "face_redetected",
+            image_id=image_id,
+            detected=len(new_faces),
+            validated_kept=len(keep_validated),
+            validated_dropped=len(validated) - len(keep_validated),
+            inserted=inserted,
+        )
+        return {
+            "image_id": image_id,
+            "detected": len(new_faces),
+            "validated_kept": len(keep_validated),
+            "validated_dropped": len(validated) - len(keep_validated),
+            "inserted": inserted,
+        }
+
+    @app.post("/api/faces/{face_id}/verify")
+    def api_verify_face(face_id: int) -> dict[str, Any]:
+        """User-confirms this face is a correct detection.
+
+        Drives the verified styling and protects the face when the user runs
+        "drop other dups of {name} on this image".
+        """
+        s = _store(app)
+        face = s.get_face(face_id)
+        if face is None:
+            raise HTTPException(status_code=404, detail="face not found")
+        with s.transaction():
+            s.set_face_user_verified(face_id, 1)
+            s.log_face_correction(
+                face_id=face_id,
+                image_id=int(face["image_id"]),
+                action="verified",
+            )
+        log.info("face_user_verified", face_id=face_id)
+        return {"ok": True, "face_id": face_id, "user_verified": 1}
+
+    @app.post("/api/faces/{face_id}/unverify")
+    def api_unverify_face(face_id: int) -> dict[str, Any]:
+        s = _store(app)
+        face = s.get_face(face_id)
+        if face is None:
+            raise HTTPException(status_code=404, detail="face not found")
+        with s.transaction():
+            s.set_face_user_verified(face_id, None)
+            s.log_face_correction(
+                face_id=face_id,
+                image_id=int(face["image_id"]),
+                action="unverified",
+            )
+        return {"ok": True, "face_id": face_id, "user_verified": None}
+
+    @app.post("/api/images/{image_id}/faces/validate-named")
+    def api_validate_named(image_id: int) -> dict[str, Any]:
+        """Bulk-mark every named-but-not-yet-validated face on this image
+        as user_verified=1. Use case: photo with a few well-clustered
+        people, user trusts all the auto-assignments at once."""
+        s = _store(app)
+        if s.get_image(image_id) is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        with s.transaction():
+            ids = s.validate_named_unvalidated_for_image(image_id)
+            for fid in ids:
+                s.log_face_correction(face_id=fid, image_id=image_id, action="verified")
+        log.info("named_validated_bulk", image_id=image_id, validated=len(ids))
+        return {"validated": len(ids), "image_id": image_id}
+
+    @app.delete("/api/images/{image_id}/faces/dups-of/{label}")
+    def api_drop_dups_on_image(image_id: int, label: str, keep_face_id: int) -> dict[str, Any]:
+        """Drop faces on this image that carry `label` (label_user) except
+        `keep_face_id` (the verified one). Use after the user marks the real
+        detection of "Alex" verified to clean up the false-positive triple."""
+        s = _store(app)
+        if s.get_image(image_id) is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        with s.transaction():
+            n = s.delete_other_named_faces_on_image(image_id, label, keep_face_id)
+        log.info("dups_dropped", image_id=image_id, label=label, kept=keep_face_id, deleted=n)
+        return {"deleted": n, "kept": keep_face_id, "label": label}
 
     @app.delete("/api/faces/{face_id}")
     def api_delete_face(face_id: int) -> dict[str, Any]:
@@ -320,45 +568,37 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
     @app.post("/api/faces/{face_id}/unassign")
     def api_unassign_face(face_id: int) -> dict[str, Any]:
-        """Remove this face's cluster assignment in the latest run.
+        """Remove this face's cluster assignment in the most recent run that
+        actually holds it.
 
         Use case: face was clustered to the wrong person. The face row stays
         so the next `phototag faces cluster` can re-place it. We log the
         old cluster_id in face_corrections so future passes can use it as a
         cannot-link constraint.
+
+        Targeting the most-recent-run-holding-this-face (not the global latest
+        run) means a face stuck in an old manual run still gets unassigned;
+        after this call the face is orphan / unidentified until a new
+        `phototag faces cluster` pass picks it up again. Faces that were only
+        in the noise cluster therefore become true orphans here, which is the
+        desired outcome — noise is not a real identity.
         """
         s = _store(app)
         face = s.get_face(face_id)
         if face is None:
             raise HTTPException(status_code=404, detail="face not found")
-        latest = s.latest_face_run()
         with s.transaction():
-            # Capture the old cluster ids before deleting so we can record them.
-            scoped_clusters: list[int] = []
-            if latest is None:
-                rows = s.conn.execute(
-                    "SELECT cluster_id FROM face_cluster_assignments WHERE face_id=?",
-                    (face_id,),
-                ).fetchall()
-                scoped_clusters = [int(r["cluster_id"]) for r in rows]
-                s.conn.execute("DELETE FROM face_cluster_assignments WHERE face_id=?", (face_id,))
-                for cid in scoped_clusters:
-                    s.conn.execute(
-                        "UPDATE face_clusters SET size = MAX(0, size - 1) WHERE id=?",
-                        (cid,),
-                    )
-                removed = len(scoped_clusters)
+            # Use the run that the user is *actually looking at* — i.e. the
+            # most recent run holding this face. Falling back to the global
+            # latest_face_run() can no-op when the displayed cluster is from a
+            # manual run that predates a later auto run.
+            target_run = s.latest_run_holding_face(face_id)
+            if target_run is not None:
+                scoped_clusters = s.face_clusters_for_face_in_run(face_id, target_run)
+                removed = s.unassign_face_from_run(face_id, target_run) if scoped_clusters else 0
             else:
-                rows = s.conn.execute(
-                    """
-                    SELECT fc.id AS cid FROM face_cluster_assignments fca
-                    JOIN face_clusters fc ON fc.id = fca.cluster_id
-                    WHERE fca.face_id=? AND fc.run_id=?
-                    """,
-                    (face_id, latest),
-                ).fetchall()
-                scoped_clusters = [int(r["cid"]) for r in rows]
-                removed = s.unassign_face_from_run(face_id, latest)
+                scoped_clusters = s.face_clusters_for_face(face_id)
+                removed = s.unassign_face_globally(face_id) if scoped_clusters else 0
             for cid in scoped_clusters:
                 s.log_face_correction(
                     face_id=face_id,
@@ -441,11 +681,6 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
     # ---- faces (v2) ----
 
-    def _face_color(cluster_id: int | None) -> str:
-        if cluster_id is None:
-            return "hsl(0, 0%, 70%)"
-        return f"hsl({(cluster_id * 137) % 360}, 70%, 55%)"
-
     @app.get("/api/faces/summary")
     def api_faces_summary() -> dict[str, int]:
         return _store(app).faces_summary()
@@ -475,11 +710,12 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     "bbox": f["bbox"],
                     "det_score": f["det_score"],
                     "verified": f["verified"],
+                    "user_verified": f.get("user_verified"),
                     "cluster_id": f["cluster_id"],
                     "cluster_no": f["cluster_no"],
                     "label": f["label_user"] or f["label_auto"],
                     "named": f["label_user"] is not None,
-                    "color": _face_color(f["cluster_id"]),
+                    "color": cluster_color(f["cluster_id"]),
                 }
             )
         return out
@@ -511,7 +747,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                     "name": c["label_user"],
                     "auto": c["label_auto"],
                     "size": c["size"],
-                    "color": _face_color(c["id"]),
+                    "color": cluster_color(c["id"]),
                     "samples": [{"face_id": m["face_id"], "image_id": m["image_id"]} for m in members],
                 }
             )
@@ -537,7 +773,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             members = s.face_cluster_members(int(c["id"]), limit=limit)
             for m in members:
                 seen_images.add(int(m["image_id"]))
-            groups.append({**c, "color": _face_color(int(c["id"])), "members": members})
+            groups.append({**c, "color": cluster_color(int(c["id"])), "members": members})
         return {
             "name": name,
             "n_clusters": len(clusters),
@@ -557,7 +793,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         members = s.face_cluster_members(cluster_id, limit=limit)
         return {
             **cluster,
-            "color": _face_color(cluster_id),
+            "color": cluster_color(cluster_id),
             "members": members,
         }
 
@@ -591,9 +827,6 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         name = (body.name or "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="name required")
-
-        from datetime import UTC
-        from datetime import datetime as _dt
 
         from .faces import MODEL_NAME
 
@@ -651,8 +884,23 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 cluster_id=cid,
                 name=name,
             )
+            # Naming a face is an explicit user assertion that this face is
+            # this person → mark it user_verified at the same time so the
+            # green check shows up immediately and dup-drop spares it.
+            s.set_face_user_verified(face_id, 1)
+            # Naming is the user telling us this face has a real identity;
+            # the noise membership is now stale and would (a) inflate the
+            # noise cluster's size and (b) keep this face listed under
+            # "unidentified". Detach it.
+            detached = s.detach_face_from_noise(face_id)
 
-        log.info("face_named_manual", face_id=face_id, cluster_id=cid, name=name)
+        log.info(
+            "face_named_manual",
+            face_id=face_id,
+            cluster_id=cid,
+            name=name,
+            detached_from_noise=detached,
+        )
         return {"ok": True, "face_id": face_id, "cluster_id": cid, "name": name}
 
     @app.get("/api/faces/corrections")
@@ -691,5 +939,6 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     return app
 
 
-# Module-level app instance for `uvicorn phototag.ui:app` invocation.
-app = create_app()
+# Intentionally no module-level `app` instance: importing this module must not
+# open a SQLite connection or run migrations as a side effect. Use the CLI's
+# `phototag serve`, which calls create_app() with the resolved settings.

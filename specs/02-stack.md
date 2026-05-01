@@ -2,7 +2,7 @@
 
 | Layer | Choice | Rationale |
 |---|---|---|
-| Language | Python 3.11+ | ML ecosystem |
+| Language | Python 3.14 | ML ecosystem; `pyproject.toml` `requires-python = ">=3.14"` |
 | Tagger | RAM++ (`xinyu1205/recognize-anything`) | ~4500 open tags, runs locally |
 | Embeddings | `open_clip` ViT-L/14 or ViT-B/32 | Standard, robust |
 | Dim. reduction | `umap-learn` | Preserves local structure |

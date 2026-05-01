@@ -26,8 +26,10 @@
       <button id="clear-filters" style="margin-top:6px;">clear</button>
     </div>
     <div class="section">
-      <h3>top tags</h3>
-      <div class="tags" id="top-tags"></div>
+      <h3 class="collapsible" id="top-tags-toggle" data-target="top-tags">
+        <span class="caret">▸</span> top tags
+      </h3>
+      <div class="tags" id="top-tags" style="display:none;"></div>
     </div>
     <div class="section">
       <h3>views</h3>
@@ -38,6 +40,12 @@
     </div>
     <div class="section" style="padding:0;">
       <h3 style="padding:8px 10px 4px;" id="cluster-pane-title">clusters</h3>
+      <div class="cluster-filter-wrap" style="padding:6px 10px; position:relative;">
+        <input id="cluster-filter" type="text" placeholder="filter (space = AND)…" autocomplete="off"
+               style="width:100%; padding:4px 24px 4px 7px; border:1px solid var(--border); border-radius:4px; font-size:12px;">
+        <button id="cluster-filter-clear" type="button" title="clear (Esc)"
+                style="position:absolute; right:14px; top:50%; transform:translateY(-50%); border:0; background:transparent; cursor:pointer; color:var(--muted); font-size:14px; padding:0 4px; display:none;">×</button>
+      </div>
       <div id="cluster-list"></div>
     </div>
   </aside>
@@ -62,7 +70,9 @@
     <button id="face-name-save" title="save (Enter)">save</button>
   </div>
   <div class="row actions">
-    <button id="face-view-person" title="view this person's photos (V)" style="display:none;">view <span class="key">V</span></button>
+    <button id="face-view-person" title="go to this person's photos (G)" style="display:none;">go <span class="key">G</span></button>
+    <button id="face-verify" title="validate this detection (V)" style="display:none;">validate <span class="key">V</span></button>
+    <button id="face-drop-dups" title="drop other faces with the same name on this image (X)" style="display:none;">drop dups <span class="key">X</span></button>
     <button id="face-wrong" title="this face was clustered with the wrong person (W)" style="display:none;">wrong <span class="key">W</span></button>
     <button id="face-delete" title="not a face / delete row (D)">delete <span class="key">D</span></button>
     <span class="spacer"></span>

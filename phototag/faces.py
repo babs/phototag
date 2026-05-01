@@ -97,10 +97,16 @@ class FaceDetector:
 
 
 def _open_image(path: Path) -> Image.Image | None:
+    """Decode an image and detach it from the underlying file handle.
+
+    `Image.open` keeps the file open until `.close()`; under a 10k+ scan that
+    leaks file descriptors. We open inside a context, force decode via .copy(),
+    and let the with-block close the source handle.
+    """
     try:
-        img = Image.open(path)
-        img.load()
-        return img
+        with Image.open(path) as img:
+            img.load()
+            return img.copy()
     except Exception as e:
         log.warning("decode_failed", path=str(path), error=str(e))
         return None
@@ -161,10 +167,11 @@ def detect_faces_all(
             log.error("face_detect_failed", path=path, error=str(e))
             counts["failed"] += 1
             continue
-        if force:
-            with store.transaction():
-                store.delete_faces_for_image(image_id, detector.name)
+        # Single transaction so a reader never sees the image with zero faces
+        # mid-replacement when running with --force.
         with store.transaction():
+            if force:
+                store.delete_faces_for_image(image_id, detector.name)
             for face in faces:
                 store.insert_face(
                     image_id=image_id,
@@ -308,11 +315,217 @@ def cluster_faces(
     return run_id
 
 
+def cluster_orphan_faces(
+    store: Store,
+    *,
+    min_cluster_size: int = 3,
+    min_samples: int = 2,
+    identity_match_threshold: float = 0.5,
+    random_state: int = 42,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Re-cluster only orphan/noise faces (those not in any named cluster).
+
+    Useful after the user has qualified a chunk of faces by hand: the now-
+    smaller orphan pool can be re-clustered with looser parameters and any
+    cluster whose centroid matches an existing identity reattaches the
+    person's name automatically.
+
+    `dry_run=True` returns the proposed clustering without writing anything.
+    Otherwise a new face_run is created with `params_json.type = "orphan_refinement"`.
+    Existing named clusters are NOT touched in either mode.
+    """
+    import hdbscan
+    import umap
+
+    face_ids, vectors = store.load_orphan_face_embeddings(MODEL_NAME)
+    if vectors.shape[0] < min_cluster_size:
+        return {
+            "run_id": None,
+            "dry_run": dry_run,
+            "n_orphan": int(vectors.shape[0]),
+            "n_clusters": 0,
+            "n_noise": int(vectors.shape[0]),
+            "named_via_identity": 0,
+            "clusters": [],
+            "error": (
+                f"not enough orphan faces ({vectors.shape[0]}) for min_cluster_size={min_cluster_size}"
+            ),
+        }
+    log.info(
+        "faces_orphan_recluster_started",
+        n=int(vectors.shape[0]),
+        dim=int(vectors.shape[1]),
+        dry_run=dry_run,
+    )
+
+    n_components = min(50, max(2, vectors.shape[0] - 2))
+    n_neighbors = min(30, max(2, vectors.shape[0] - 1))
+    reduced = umap.UMAP(
+        n_components=n_components,
+        n_neighbors=n_neighbors,
+        min_dist=0.0,
+        metric="cosine",
+        random_state=random_state,
+    ).fit_transform(vectors)
+
+    labels = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        metric="euclidean",
+        cluster_selection_method="eom",
+    ).fit_predict(reduced)
+
+    members: dict[int, list[tuple[int, np.ndarray, np.ndarray]]] = {}
+    for fid, lab, vec, rvec in zip(face_ids, labels, vectors, reduced, strict=True):
+        members.setdefault(int(lab), []).append((fid, vec, rvec))
+
+    emb_centroids: dict[int, np.ndarray] = {}
+    red_centroids: dict[int, np.ndarray] = {}
+    for lv, m in members.items():
+        if lv == -1:
+            continue
+        emb_centroids[lv] = np.vstack([v for _, v, _ in m]).mean(axis=0)
+        red_centroids[lv] = np.vstack([rv for _, _, rv in m]).mean(axis=0)
+
+    identities = store.list_face_identities()
+
+    def match_identity(centroid: np.ndarray) -> dict[str, Any] | None:
+        if not identities:
+            return None
+        best, best_sim = None, -1.0
+        for ident in identities:
+            sim = _cosine_sim(centroid, ident["centroid"])
+            if sim > best_sim:
+                best, best_sim = ident, sim
+        if best is None or best_sim < identity_match_threshold:
+            return None
+        return best
+
+    summary_clusters: list[dict[str, Any]] = []
+    for lv in sorted(k for k in members if k != -1):
+        m = members[lv]
+        hit = match_identity(emb_centroids[lv])
+        summary_clusters.append(
+            {
+                "cluster_no": int(lv),
+                "size": len(m),
+                "label_auto": f"orphan-cluster {lv}",
+                "label_user": hit["name"] if hit else None,
+                "sample_face_ids": [fid for fid, _, _ in m[:5]],
+            }
+        )
+
+    n_clusters = len(summary_clusters)
+    n_noise = len(members.get(-1, []))
+    named_via_identity = sum(1 for c in summary_clusters if c["label_user"])
+
+    if dry_run:
+        log.info(
+            "faces_orphan_recluster_dryrun",
+            n_clusters=n_clusters,
+            n_noise=n_noise,
+            named_via_identity=named_via_identity,
+        )
+        return {
+            "run_id": None,
+            "dry_run": True,
+            "n_orphan": int(vectors.shape[0]),
+            "n_clusters": n_clusters,
+            "n_noise": n_noise,
+            "named_via_identity": named_via_identity,
+            "clusters": summary_clusters,
+        }
+
+    params = {
+        "type": "orphan_refinement",
+        "model": MODEL_NAME,
+        "n_orphan": int(vectors.shape[0]),
+        "umap": {
+            "n_components": n_components,
+            "n_neighbors": n_neighbors,
+            "metric": "cosine",
+            "random_state": random_state,
+        },
+        "hdbscan": {
+            "min_cluster_size": min_cluster_size,
+            "min_samples": min_samples,
+            "metric": "euclidean",
+        },
+        "identity_match_threshold": identity_match_threshold,
+    }
+
+    with store.transaction():
+        # Detach the orphan faces from their previous (un-named) cluster
+        # assignments first. Without this, the old noise/auto-cluster `size`
+        # counters keep counting these faces forever and the unidentified
+        # workspace would still list them via `list_faces_for_image` picking
+        # the older run when the new run is the same numeric run_id.
+        for fid in face_ids:
+            store.unassign_face_globally(fid)
+
+        run_id = store.create_face_run(params, _now_iso())
+        for lv in sorted(members.keys()):
+            m = members[lv]
+            label_user = None
+            label_auto = "noise" if lv == -1 else f"orphan-cluster {lv}"
+            if lv != -1:
+                hit = match_identity(emb_centroids[lv])
+                if hit is not None:
+                    label_user = hit["name"]
+            cid = store.add_face_cluster(
+                run_id=run_id,
+                cluster_no=lv,
+                size=len(m),
+                label_auto=label_auto,
+                label_user=label_user,
+            )
+            if lv == -1:
+                for fid, _, _ in m:
+                    store.assign_face_to_cluster(fid, cid, distance=0.0)
+            else:
+                centroid = red_centroids[lv]
+                for fid, _, rvec in m:
+                    d = float(np.linalg.norm(rvec - centroid))
+                    store.assign_face_to_cluster(fid, cid, distance=d)
+            if lv != -1 and label_user is not None:
+                store.upsert_face_identity(label_user, emb_centroids[lv], n_samples=len(m))
+
+    log.info(
+        "faces_orphan_recluster_done",
+        run_id=run_id,
+        n_clusters=n_clusters,
+        n_noise=n_noise,
+        named_via_identity=named_via_identity,
+    )
+    return {
+        "run_id": run_id,
+        "dry_run": False,
+        "n_orphan": int(vectors.shape[0]),
+        "n_clusters": n_clusters,
+        "n_noise": n_noise,
+        "named_via_identity": named_via_identity,
+        "clusters": summary_clusters,
+    }
+
+
 def name_cluster(store: Store, cluster_id: int, name: str | None) -> None:
-    """Set/clear `label_user` and update `face_identities`."""
+    """Set/clear `label_user` and update `face_identities`.
+
+    Refuses to set a non-null name on the noise cluster (cluster_no=-1):
+    noise is a heterogeneous bag of faces and labelling it whole would tag
+    every unrelated face on the same name. Clearing (name=None) is allowed
+    so users can fix a previously-mislabelled noise cluster.
+    """
     cluster = store.get_face_cluster(cluster_id)
     if cluster is None:
         raise ValueError(f"face cluster {cluster_id} not found")
+    if name and int(cluster.get("cluster_no", 0)) == -1:
+        raise ValueError(
+            "cannot name the noise cluster — it groups unrelated faces. "
+            "Use the per-face name action (POST /api/faces/{id}/name) "
+            "to create a manual cluster instead."
+        )
     with store.transaction():
         store.set_face_cluster_label_user(cluster_id, name)
         if name:
@@ -423,6 +636,7 @@ __all__ = [
     "FaceDetector",
     "detect_faces_all",
     "cluster_faces",
+    "cluster_orphan_faces",
     "name_cluster",
     "verify_faces",
     "crop_face",

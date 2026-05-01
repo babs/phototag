@@ -317,6 +317,16 @@ def serve(
 
     from .ui import create_app
 
+    log = get_logger("phototag.serve")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        # Endpoints have no auth and serve every photo on disk by integer id;
+        # binding non-loopback exposes that to the LAN. Warn loudly.
+        log.warning(
+            "non_loopback_bind",
+            host=host,
+            note="UI has no auth; do not expose to untrusted networks.",
+        )
+
     settings = load_settings()
     fapp = create_app(db_path=settings.db_path)
     uvicorn.run(fapp, host=host, port=port, log_config=None, access_log=False)
@@ -437,10 +447,12 @@ def faces_purge(
 ) -> None:
     """Drop all face data."""
     if not yes:
-        typer.confirm(
-            "This will delete all face detections, clusters, and identities. Continue?",
-            abort=True,
+        scope = (
+            "delete all face detections, clusters, and runs (identities + corrections kept)"
+            if keep_identities
+            else "delete EVERYTHING face-related: detections, clusters, runs, identities, and corrections"
         )
+        typer.confirm(f"This will {scope}. Continue?", abort=True)
     settings = load_settings()
     store = Store(settings.db_path)
     try:
@@ -481,17 +493,70 @@ def faces_verify(
         store.close()
 
 
+@faces_app.command("refine-noise")
+def faces_refine_noise(
+    min_size: Annotated[int, typer.Option("--min-size", help="HDBSCAN min_cluster_size")] = 3,
+    min_samples: Annotated[int, typer.Option(help="HDBSCAN min_samples")] = 2,
+    persist: Annotated[
+        bool,
+        typer.Option("--persist", help="store results as a new face_run; otherwise dry-run only"),
+    ] = False,
+) -> None:
+    """Re-cluster orphan/noise faces and reattach identities by centroid match.
+
+    Default is dry-run: prints the proposed clusters + how many recover their
+    name via the identities table. Pass `--persist` to write a new face_run
+    capturing the result. Existing named clusters are not touched.
+    """
+    from .faces import cluster_orphan_faces
+
+    settings = load_settings()
+    log = get_logger("phototag.faces")
+    store = Store(settings.db_path)
+    try:
+        result = cluster_orphan_faces(
+            store, min_cluster_size=min_size, min_samples=min_samples, dry_run=not persist
+        )
+        log.info("faces_orphan_recluster_summary", **{k: v for k, v in result.items() if k != "clusters"})
+        typer.echo(json.dumps(result, indent=2, default=str))
+    finally:
+        store.close()
+
+
+@faces_app.command("clear-noise-labels")
+def faces_clear_noise_labels() -> None:
+    """Wipe any user label sitting on a noise cluster (cluster_no=-1).
+
+    Noise groups visually-unrelated faces; a label there mass-tags every one of
+    them. Run this once to recover from the historic bug where the UI allowed
+    naming noise.
+    """
+    settings = load_settings()
+    store = Store(settings.db_path)
+    try:
+        with store.transaction():
+            n = store.clear_noise_cluster_labels()
+        typer.echo(f"cleared label_user from {n} noise cluster row(s)")
+    finally:
+        store.close()
+
+
 @faces_app.command("stats")
 def faces_stats() -> None:
-    """Quick counts: faces, clusters, runs, identities."""
+    """Quick counts: faces, clusters, runs, identities, unidentified, validated."""
     settings = load_settings()
     store = Store(settings.db_path)
     try:
         n_faces = store.count_faces()
         n_run = store.latest_face_run() or 0
-        n_clusters = len(store.list_face_clusters(n_run)) if n_run else 0
-        n_named = sum(1 for c in store.list_face_clusters(n_run) if c["label_user"]) if n_run else 0
+        clusters = store.list_face_clusters(n_run) if n_run else []
+        n_clusters = len(clusters)
+        n_named = sum(1 for c in clusters if c["label_user"])
         n_ids = len(store.list_face_identities())
+        n_unidentified = store.count_unidentified_faces()
+        n_user_verified = int(
+            store.conn.execute("SELECT COUNT(*) AS n FROM faces WHERE user_verified=1").fetchone()["n"]
+        )
         typer.echo(
             json.dumps(
                 {
@@ -500,6 +565,8 @@ def faces_stats() -> None:
                     "clusters_in_latest_run": n_clusters,
                     "named_clusters": n_named,
                     "identities": n_ids,
+                    "unidentified": n_unidentified,
+                    "user_verified": n_user_verified,
                 },
                 indent=2,
             )

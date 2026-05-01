@@ -57,7 +57,7 @@ phototag/
 
 ## Conventions
 
-- Python 3.11+ only.
+- Python 3.14+ (matches `pyproject.toml` `requires-python` and `ruff target-version = "py314"`).
 - Type hints everywhere; `mypy --strict` in CI.
 - Format: `ruff format`. Lint: `ruff check`.
 - No comments unless WHY is non-obvious (per global rules).

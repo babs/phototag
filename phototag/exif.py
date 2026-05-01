@@ -12,6 +12,10 @@ from typing import Any
 from PIL import ExifTags, Image
 from PIL.ExifTags import GPSTAGS
 
+from .logging import get_logger
+
+log = get_logger(__name__)
+
 # IFD pointers within the main EXIF block.
 _EXIF_IFD = 0x8769  # ExifIFDPointer
 _GPS_IFD = 0x8825  # GPSInfoIFDPointer
@@ -72,39 +76,41 @@ def _parse_exif_dt(s: Any) -> str | None:
 def extract_exif(path: Path) -> dict[str, Any] | None:
     """Return useful EXIF fields, or None if the image has no EXIF."""
     try:
-        img = Image.open(path)
-    except Exception:
-        return None
-    try:
-        exif = img.getexif()
-    except Exception:
-        return None
-    if not exif:
-        return None
+        with Image.open(path) as img:
+            try:
+                exif = img.getexif()
+            except Exception as e:
+                log.warning("exif_read_failed", path=str(path), error=str(e))
+                return None
+            if not exif:
+                return None
 
-    named: dict[str, Any] = {}
-    for tag_id, val in exif.items():
-        name = ExifTags.TAGS.get(tag_id, str(tag_id))
-        named[name] = _to_jsonable(val)
+            named: dict[str, Any] = {}
+            for tag_id, val in exif.items():
+                name = ExifTags.TAGS.get(tag_id, str(tag_id))
+                named[name] = _to_jsonable(val)
 
-    # ExifIFD (where DateTimeOriginal lives, plus exposure data).
-    try:
-        exif_ifd = exif.get_ifd(_EXIF_IFD)
-    except Exception:
-        exif_ifd = None
-    if exif_ifd:
-        for tag_id, val in exif_ifd.items():
-            name = ExifTags.TAGS.get(tag_id, str(tag_id))
-            named[name] = _to_jsonable(val)
+            # ExifIFD (where DateTimeOriginal lives, plus exposure data).
+            try:
+                exif_ifd = exif.get_ifd(_EXIF_IFD)
+            except Exception:
+                exif_ifd = None
+            if exif_ifd:
+                for tag_id, val in exif_ifd.items():
+                    name = ExifTags.TAGS.get(tag_id, str(tag_id))
+                    named[name] = _to_jsonable(val)
 
-    gps: dict[str, Any] = {}
-    try:
-        gps_ifd = exif.get_ifd(_GPS_IFD)
-    except Exception:
-        gps_ifd = None
-    if gps_ifd:
-        for tag_id, val in gps_ifd.items():
-            gps[GPSTAGS.get(tag_id, str(tag_id))] = _to_jsonable(val)
+            gps: dict[str, Any] = {}
+            try:
+                gps_ifd = exif.get_ifd(_GPS_IFD)
+            except Exception:
+                gps_ifd = None
+            if gps_ifd:
+                for tag_id, val in gps_ifd.items():
+                    gps[GPSTAGS.get(tag_id, str(tag_id))] = _to_jsonable(val)
+    except Exception as e:
+        log.warning("exif_open_failed", path=str(path), error=str(e))
+        return None
 
     out: dict[str, Any] = {}
     out["make"] = named.get("Make")

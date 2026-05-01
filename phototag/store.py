@@ -1,8 +1,11 @@
 import json
 import sqlite3
+import threading
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC
+from datetime import datetime as _dt
 from pathlib import Path
 from typing import Any
 
@@ -130,7 +133,7 @@ MIGRATIONS: list[str] = [
         id          INTEGER PRIMARY KEY,
         face_id     INTEGER,
         image_id    INTEGER,
-        action      TEXT NOT NULL,      -- 'named' | 'unassigned' | 'deleted'
+        action      TEXT NOT NULL,      -- 'named' | 'unassigned' | 'deleted' | 'verified'
         cluster_id  INTEGER,            -- old cluster on 'unassigned'/'named'
         name        TEXT,               -- new label on 'named'
         created_at  TEXT NOT NULL
@@ -138,7 +141,18 @@ MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_face_corrections_face ON face_corrections(face_id);
     CREATE INDEX IF NOT EXISTS idx_face_corrections_action ON face_corrections(action);
     """,
+    """
+    -- v7: per-face user-confirmed flag (distinct from `verified` which is set
+    -- by the heuristic verify pass). user_verified=1 means the user clicked
+    -- "verify" on the popover; used to keep this face when "drop other dups
+    -- of this name on this image" runs.
+    ALTER TABLE faces ADD COLUMN user_verified INTEGER;
+    """,
 ]
+
+
+def _now_iso_z() -> str:
+    return _dt.now(UTC).isoformat(timespec="seconds")
 
 
 @dataclass(frozen=True)
@@ -152,44 +166,89 @@ class ImageRow:
 
 
 class Store:
+    """SQLite wrapper safe for FastAPI threadpool use.
+
+    Each thread gets its own sqlite3 Connection (sqlite3.Connection objects
+    are not safe to share across threads). A process-wide RLock serializes
+    write transactions because WAL allows concurrent readers but only one
+    writer; without the lock two threads could both call BEGIN on their
+    private connections and the second would fail with `database is locked`.
+    """
+
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        # check_same_thread=False because the FastAPI UI runs sync endpoints in
-        # a threadpool. Concurrent reads under WAL are safe; writes happen in
-        # short transactions and we don't multi-write.
-        self.conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
+        self._tls = threading.local()
+        # Held across BEGIN..COMMIT to serialize writers.
+        self._write_lock = threading.RLock()
+        # Touch the connection on the constructing thread so migrations run now.
         self._migrate()
 
+    @property
+    def conn(self) -> sqlite3.Connection:
+        c: sqlite3.Connection | None = getattr(self._tls, "conn", None)
+        if c is None:
+            c = sqlite3.connect(self.db_path, isolation_level=None)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
+            c.execute("PRAGMA foreign_keys=ON")
+            # 5 s busy timeout absorbs brief writer contention without raising.
+            c.execute("PRAGMA busy_timeout=5000")
+            self._tls.conn = c
+        return c
+
     def close(self) -> None:
-        self.conn.close()
+        c: sqlite3.Connection | None = getattr(self._tls, "conn", None)
+        if c is not None:
+            c.close()
+            self._tls.conn = None
 
     def _migrate(self) -> None:
-        self.conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        row = self.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        c = self.conn
+        c.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        row = c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         current = int(row["value"]) if row else 0
         for idx, sql in enumerate(MIGRATIONS, start=1):
-            if idx > current:
-                self.conn.executescript(sql)
-                self.conn.execute(
-                    "INSERT INTO meta(key,value) VALUES('schema_version', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (str(idx),),
-                )
+            if idx <= current:
+                continue
+            # Wrap schema + version bump in a single executescript so SQLite
+            # treats them atomically (executescript runs an implicit COMMIT
+            # at script end; if any statement fails the script aborts and the
+            # version is not bumped). This avoids the "schema upgraded but
+            # version still old" failure mode where re-runs would replay
+            # already-applied ALTER TABLE statements.
+            wrapped = (
+                "BEGIN IMMEDIATE;\n"
+                f"{sql}\n"
+                "INSERT INTO meta(key,value) VALUES('schema_version', "
+                f"'{idx}') "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value;\n"
+                "COMMIT;\n"
+            )
+            with self._write_lock:
+                try:
+                    c.executescript(wrapped)
+                except Exception:
+                    # executescript already implicitly closed the failing txn;
+                    # ROLLBACK is a no-op safety net for partial state.
+                    try:
+                        c.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+                    raise
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        self.conn.execute("BEGIN")
-        try:
-            yield self.conn
-            self.conn.execute("COMMIT")
-        except Exception:
-            self.conn.execute("ROLLBACK")
-            raise
+        with self._write_lock:
+            c = self.conn
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                yield c
+                c.execute("COMMIT")
+            except Exception:
+                c.execute("ROLLBACK")
+                raise
 
     # ---- images ----
 
@@ -263,10 +322,13 @@ class Store:
     # ---- tags ----
 
     def get_or_create_tag(self, name: str) -> int:
-        row = self.conn.execute("SELECT id FROM tags WHERE name=?", (name,)).fetchone()
-        if row:
-            return int(row["id"])
-        cur = self.conn.execute("INSERT INTO tags(name) VALUES(?) RETURNING id", (name,))
+        # ON CONFLICT branch is a no-op write that still triggers RETURNING so a
+        # racing INSERT from another writer cannot make this raise IntegrityError.
+        cur = self.conn.execute(
+            "INSERT INTO tags(name) VALUES(?) "
+            "ON CONFLICT(name) DO UPDATE SET name=excluded.name RETURNING id",
+            (name,),
+        )
         return int(cur.fetchone()["id"])
 
     def replace_image_tags(self, image_id: int, model_name: str, tags: Iterable[tuple[str, float]]) -> None:
@@ -610,7 +672,7 @@ class Store:
                 FROM face_cluster_assignments fca
                 JOIN face_clusters fc ON fc.id = fca.cluster_id
             )
-            SELECT f.id, f.bbox_json, f.det_score, f.verified,
+            SELECT f.id, f.bbox_json, f.det_score, f.verified, f.user_verified,
                    r.cluster_id, r.cluster_no, r.label_user, r.label_auto
             FROM faces f
             LEFT JOIN ranked r ON r.face_id = f.id AND r.rn = 1
@@ -630,6 +692,7 @@ class Store:
                     "bbox": bbox,
                     "det_score": float(row["det_score"]),
                     "verified": row["verified"],
+                    "user_verified": row["user_verified"],
                     "cluster_id": row["cluster_id"],
                     "cluster_no": row["cluster_no"],
                     "label_user": row["label_user"],
@@ -759,8 +822,11 @@ class Store:
         return [dict(r) for r in cur]
 
     def rename_clusters_by_label(self, old: str, new: str | None) -> int:
+        # Never propagate a label onto the noise cluster (cluster_no=-1).
+        # Noise groups visually-unrelated faces and labelling it would tag
+        # everyone in the bag with the same name.
         cur = self.conn.execute(
-            "UPDATE face_clusters SET label_user=? WHERE label_user=?",
+            "UPDATE face_clusters SET label_user=? WHERE label_user=? AND cluster_no != -1",
             (new, old),
         )
         return int(cur.rowcount)
@@ -807,9 +873,6 @@ class Store:
         name: str | None = None,
     ) -> int:
         """Append a row to face_corrections; cheap audit trail of user edits."""
-        from datetime import UTC
-        from datetime import datetime as _dt
-
         cur = self.conn.execute(
             """
             INSERT INTO face_corrections(face_id,image_id,action,cluster_id,name,created_at)
@@ -821,7 +884,7 @@ class Store:
                 action,
                 cluster_id,
                 name,
-                _dt.now(UTC).isoformat(timespec="seconds"),
+                _now_iso_z(),
             ),
         )
         return int(cur.fetchone()["id"])
@@ -846,6 +909,38 @@ class Store:
     def set_face_verified(self, face_id: int, value: int | None) -> None:
         self.conn.execute("UPDATE faces SET verified=? WHERE id=?", (value, face_id))
 
+    def set_face_user_verified(self, face_id: int, value: int | None) -> None:
+        """User-driven 'this detection is correct' flag. Distinct from
+        `verified` which carries the heuristic verify_faces outcome."""
+        self.conn.execute("UPDATE faces SET user_verified=? WHERE id=?", (value, face_id))
+
+    def delete_other_named_faces_on_image(self, image_id: int, label: str, keep_face_id: int) -> int:
+        """Drop faces on `image_id` carrying user-label `label`, except
+        `keep_face_id` and any other user-validated face.
+
+        Validated faces are protected: a montage / mirror legitimately carries
+        the same person twice and the user told us so by validating both. Only
+        untrusted duplicates (the auto-clusterer's mistakes) get removed.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT f.id AS face_id
+            FROM faces f
+            JOIN face_cluster_assignments fca ON fca.face_id = f.id
+            JOIN face_clusters fc ON fc.id = fca.cluster_id
+            WHERE f.image_id = ?
+              AND fc.label_user = ?
+              AND f.id != ?
+              AND (f.user_verified IS NULL OR f.user_verified = 0)
+            """,
+            (image_id, label, keep_face_id),
+        ).fetchall()
+        n = 0
+        for r in rows:
+            self.delete_face(int(r["face_id"]))
+            n += 1
+        return n
+
     def iter_faces_for_verify(self) -> Iterator[dict[str, Any]]:
         cur = self.conn.execute("SELECT id, image_id, bbox_json, det_score, verified FROM faces")
         for row in cur:
@@ -855,6 +950,72 @@ class Store:
             except json.JSONDecodeError:
                 d["bbox"] = None
             yield d
+
+    def delete_unidentified_faces_for_image(self, image_id: int) -> int:
+        """Drop faces on this image that have no `label_user` (named) assignment.
+
+        Unidentified means: either no cluster row at all, OR every cluster the
+        face belongs to has `label_user IS NULL` (the auto "person N" labels).
+        """
+        rows = self.conn.execute(
+            """
+            SELECT f.id AS face_id
+            FROM faces f
+            WHERE f.image_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM face_cluster_assignments fca
+                  JOIN face_clusters fc ON fc.id = fca.cluster_id
+                  WHERE fca.face_id = f.id AND fc.label_user IS NOT NULL
+              )
+            """,
+            (image_id,),
+        ).fetchall()
+        n = 0
+        for r in rows:
+            self.delete_face(int(r["face_id"]))
+            n += 1
+        return n
+
+    def delete_all_unidentified_faces(self) -> int:
+        """Library-wide variant of delete_unidentified_faces_for_image."""
+        rows = self.conn.execute(
+            """
+            SELECT f.id AS face_id
+            FROM faces f
+            WHERE NOT EXISTS (
+                SELECT 1 FROM face_cluster_assignments fca
+                JOIN face_clusters fc ON fc.id = fca.cluster_id
+                WHERE fca.face_id = f.id AND fc.label_user IS NOT NULL
+            )
+            """
+        ).fetchall()
+        n = 0
+        for r in rows:
+            self.delete_face(int(r["face_id"]))
+            n += 1
+        return n
+
+    def count_unidentified_faces(self) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM faces f
+            WHERE NOT EXISTS (
+                SELECT 1 FROM face_cluster_assignments fca
+                JOIN face_clusters fc ON fc.id = fca.cluster_id
+                WHERE fca.face_id = f.id AND fc.label_user IS NOT NULL
+            )
+            """
+        ).fetchone()
+        return int(row["n"])
+
+    def list_unidentified_face_clusters(self, run_id: int) -> list[dict[str, Any]]:
+        """Within a run, every cluster lacking a user label (auto 'person N')."""
+        cur = self.conn.execute(
+            "SELECT id, cluster_no, size, label_auto, label_user FROM face_clusters "
+            "WHERE run_id=? AND label_user IS NULL AND cluster_no!=-1 ORDER BY size DESC",
+            (run_id,),
+        )
+        return [dict(r) for r in cur]
 
     def delete_all_faces_for_image(self, image_id: int) -> int:
         """Drop every face row for the image; bulk-update affected cluster sizes."""
@@ -875,6 +1036,62 @@ class Store:
             )
         cur = self.conn.execute("DELETE FROM faces WHERE image_id=?", (image_id,))
         return int(cur.rowcount)
+
+    def face_clusters_for_face(self, face_id: int) -> list[int]:
+        """All cluster ids this face is assigned to (any run)."""
+        cur = self.conn.execute(
+            "SELECT cluster_id FROM face_cluster_assignments WHERE face_id=?",
+            (face_id,),
+        )
+        return [int(r["cluster_id"]) for r in cur]
+
+    def latest_run_holding_face(self, face_id: int) -> int | None:
+        """Most recent face_run that has an assignment for this face, or None.
+
+        This mirrors the run picked by `list_faces_for_image` (display layer)
+        so user-facing "unassign" acts on the cluster the user is actually
+        looking at, even when the global latest_face_run does not include
+        this face (e.g., manual run predates a newer auto run).
+        """
+        row = self.conn.execute(
+            """
+            SELECT fc.run_id AS run_id
+            FROM face_cluster_assignments fca
+            JOIN face_clusters fc ON fc.id = fca.cluster_id
+            WHERE fca.face_id = ?
+            ORDER BY fc.run_id DESC
+            LIMIT 1
+            """,
+            (face_id,),
+        ).fetchone()
+        return int(row["run_id"]) if row else None
+
+    def face_clusters_for_face_in_run(self, face_id: int, run_id: int) -> list[int]:
+        cur = self.conn.execute(
+            """
+            SELECT fc.id AS cid FROM face_cluster_assignments fca
+            JOIN face_clusters fc ON fc.id = fca.cluster_id
+            WHERE fca.face_id=? AND fc.run_id=?
+            """,
+            (face_id, run_id),
+        )
+        return [int(r["cid"]) for r in cur]
+
+    def unassign_face_globally(self, face_id: int) -> int:
+        cids = self.face_clusters_for_face(face_id)
+        if not cids:
+            return 0
+        placeholders = ",".join("?" * len(cids))
+        self.conn.execute(
+            f"DELETE FROM face_cluster_assignments WHERE face_id=? AND cluster_id IN ({placeholders})",
+            [face_id, *cids],
+        )
+        for cid in cids:
+            self.conn.execute(
+                "UPDATE face_clusters SET size = MAX(0, size - 1) WHERE id=?",
+                (cid,),
+            )
+        return len(cids)
 
     def unassign_face_from_run(self, face_id: int, run_id: int) -> int:
         """Remove this face's cluster assignment(s) within a single run.
@@ -931,6 +1148,180 @@ class Store:
             s = by_name.get(name, set())
             common = s if common is None else common & s
         return common or set()
+
+    def validate_named_unvalidated_for_image(self, image_id: int) -> list[int]:
+        """Mark every named face on this image as user_verified=1 unless it
+        already is. Returns the list of face_ids that flipped, so the caller
+        can write per-face audit rows.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT f.id FROM faces f
+            WHERE f.image_id = ?
+              AND (f.user_verified IS NULL OR f.user_verified = 0)
+              AND EXISTS (
+                  SELECT 1 FROM face_cluster_assignments fca
+                  JOIN face_clusters fc ON fc.id = fca.cluster_id
+                  WHERE fca.face_id = f.id AND fc.label_user IS NOT NULL
+              )
+            """,
+            (image_id,),
+        ).fetchall()
+        ids = [int(r["id"]) for r in rows]
+        for fid in ids:
+            self.conn.execute("UPDATE faces SET user_verified = 1 WHERE id = ?", (fid,))
+        return ids
+
+    def count_named_unvalidated_for_image(self, image_id: int) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM faces f
+            WHERE f.image_id = ?
+              AND (f.user_verified IS NULL OR f.user_verified = 0)
+              AND EXISTS (
+                  SELECT 1 FROM face_cluster_assignments fca
+                  JOIN face_clusters fc ON fc.id = fca.cluster_id
+                  WHERE fca.face_id = f.id AND fc.label_user IS NOT NULL
+              )
+            """,
+            (image_id,),
+        ).fetchone()
+        return int(row["n"])
+
+    def load_orphan_face_embeddings(self, model_name: str) -> tuple[list[int], np.ndarray]:
+        """Load embeddings for orphan/noise faces only.
+
+        An orphan face has no `face_cluster_assignments` row whose cluster
+        carries a `label_user`. This mirrors `count_unidentified_faces`.
+        Used by the noise/orphan re-cluster pass.
+        """
+        cur = self.conn.execute(
+            """
+            SELECT f.id, f.dim, f.embedding
+            FROM faces f
+            WHERE f.model_name = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM face_cluster_assignments fca
+                  JOIN face_clusters fc ON fc.id = fca.cluster_id
+                  WHERE fca.face_id = f.id AND fc.label_user IS NOT NULL
+              )
+            ORDER BY f.id
+            """,
+            (model_name,),
+        )
+        ids: list[int] = []
+        vecs: list[np.ndarray] = []
+        for row in cur:
+            ids.append(int(row["id"]))
+            vecs.append(np.frombuffer(row["embedding"], dtype=np.float32, count=int(row["dim"])))
+        if not ids:
+            return [], np.zeros((0, 0), dtype=np.float32)
+        return ids, np.vstack(vecs)
+
+    def list_user_verified_faces_for_image(self, image_id: int) -> list[dict[str, Any]]:
+        """Faces on this image that the user has validated. Used by the
+        redetect path to keep them across a re-run."""
+        cur = self.conn.execute(
+            "SELECT id, bbox_json FROM faces WHERE image_id=? AND user_verified=1",
+            (image_id,),
+        )
+        out: list[dict[str, Any]] = []
+        for row in cur:
+            try:
+                bbox = json.loads(row["bbox_json"])
+            except json.JSONDecodeError:
+                bbox = None
+            out.append({"id": int(row["id"]), "bbox": bbox})
+        return out
+
+    def delete_non_verified_faces_for_image(self, image_id: int, model_name: str) -> int:
+        """Delete every face row for the image *except* user-verified ones.
+
+        Cluster sizes are decremented for each removed face's assignments.
+        """
+        rows = self.conn.execute(
+            "SELECT id FROM faces WHERE image_id=? AND model_name=? "
+            "AND (user_verified IS NULL OR user_verified = 0)",
+            (image_id, model_name),
+        ).fetchall()
+        n = 0
+        for r in rows:
+            self.delete_face(int(r["id"]))
+            n += 1
+        return n
+
+    def detach_face_from_noise(self, face_id: int) -> int:
+        """Drop this face's assignments to any noise cluster (cluster_no=-1).
+
+        Used right after a face is given a real identity: keeping the noise
+        membership would over-count the noise cluster size and clutter the
+        unidentified view with a now-named face.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT fc.id AS cluster_id
+            FROM face_cluster_assignments fca
+            JOIN face_clusters fc ON fc.id = fca.cluster_id
+            WHERE fca.face_id = ? AND fc.cluster_no = -1
+            """,
+            (face_id,),
+        ).fetchall()
+        cids = [int(r["cluster_id"]) for r in rows]
+        if not cids:
+            return 0
+        placeholders = ",".join("?" * len(cids))
+        self.conn.execute(
+            f"DELETE FROM face_cluster_assignments WHERE face_id=? AND cluster_id IN ({placeholders})",
+            [face_id, *cids],
+        )
+        for cid in cids:
+            self.conn.execute(
+                "UPDATE face_clusters SET size = MAX(0, size - 1) WHERE id=?",
+                (cid,),
+            )
+        return len(cids)
+
+    def list_images_with_unidentified_faces(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        """Photos containing at least one unidentified face.
+
+        "Unidentified" = same definition as `count_unidentified_faces`: no
+        cluster carrying a `label_user`. The count column is the *unidentified*
+        face count for that photo, not the total face count.
+        """
+        cur = self.conn.execute(
+            """
+            SELECT i.id, i.path, COUNT(f.id) AS face_count
+            FROM images i
+            JOIN faces f ON f.image_id = i.id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM face_cluster_assignments fca
+                JOIN face_clusters fc ON fc.id = fca.cluster_id
+                WHERE fca.face_id = f.id AND fc.label_user IS NOT NULL
+            )
+            GROUP BY i.id
+            ORDER BY face_count DESC, i.id
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(r) for r in cur]
+
+    def clear_noise_cluster_labels(self) -> int:
+        """Wipe any user-label that was mistakenly applied to a noise cluster.
+
+        Noise clusters (cluster_no=-1) group unrelated faces; labelling them
+        propagates the name to every unrelated face. Returns the number of
+        rows updated. Safe to call repeatedly.
+
+        TODO: this does NOT remove the corresponding `face_identities` row
+        whose centroid was blended from noise faces — that centroid is now
+        corrupting future identity matching at re-cluster time. Manual fix
+        for now: `phototag faces purge --keep-identities=false`.
+        """
+        cur = self.conn.execute(
+            "UPDATE face_clusters SET label_user = NULL WHERE cluster_no = -1 AND label_user IS NOT NULL"
+        )
+        return int(cur.rowcount)
 
     def list_face_clusters(self, run_id: int) -> list[dict[str, Any]]:
         cur = self.conn.execute(
@@ -1006,9 +1397,13 @@ class Store:
         return int(cur.fetchone()["id"])
 
     def purge_faces(self, *, keep_identities: bool = False) -> None:
+        # Spec 15-faces.md: "wipe is total" — corrections audit trail goes too
+        # unless --keep-identities is set (in which case corrections referencing
+        # surviving identities stay readable for future re-cluster passes).
         self.conn.execute("DELETE FROM face_cluster_assignments")
         self.conn.execute("DELETE FROM face_clusters")
         self.conn.execute("DELETE FROM face_runs")
         self.conn.execute("DELETE FROM faces")
         if not keep_identities:
             self.conn.execute("DELETE FROM face_identities")
+            self.conn.execute("DELETE FROM face_corrections")

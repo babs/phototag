@@ -20,6 +20,13 @@
   aside { border-right: 1px solid var(--border); overflow-y: auto; background: #fff; }
   aside .section { padding: 8px 10px; border-bottom: 1px solid var(--border); }
   aside .section h3 { font-size: 11px; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; letter-spacing: 0.5px; }
+  aside .section h3.collapsible { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 4px; }
+  aside .section h3.collapsible .caret { display: inline-block; transition: transform 0.1s; font-size: 10px; }
+  aside .section h3.collapsible.open .caret { transform: rotate(90deg); }
+  /* Highlight rows that don't match the cluster-list filter */
+  .cluster-row.hidden { display: none; }
+  /* Highlighted matches injected by the quick filter */
+  #cluster-list .cluster-row b { background: #fff2a8; color: inherit; font-weight: 700; padding: 0 1px; border-radius: 2px; }
   .cluster-row {
     padding: 6px 10px; cursor: pointer; border-bottom: 1px solid #f0f0f0;
     display: flex; gap: 8px; justify-content: space-between; align-items: center;
@@ -98,6 +105,23 @@
   }
   .face-box.suspect { border-style: dashed; border-color: #ef4444; opacity: 0.85; }
   .face-box.suspect .face-label { background: #ef4444; color: #fff; }
+  /* Same name on two faces in the same photo is almost certainly a clustering
+     false positive (mirror/montage edge cases excepted). Highlighting the
+     box draws the user toward the wrong/split actions in the popover. */
+  .face-box.dup { border-color: #f59e0b; box-shadow: 0 0 0 2px rgba(245,158,11,0.35); }
+  .face-box.dup .face-label { background: #f59e0b; color: #111; font-weight: 600; }
+  /* User-verified: keep the per-cluster color/styling; verification only
+     suppresses the "?" prefix on the label (handled in JS). */
+  /* Hover preview when the user is about to bulk-drop unidentified faces:
+     paint the at-risk boxes red so they can see exactly what disappears, and
+     hide the named/verified ones so only the doomed faces remain visible. */
+  .face-box.drop-preview { border-color: #dc2626 !important; border-style: solid !important; box-shadow: 0 0 0 2px rgba(220,38,38,0.45); }
+  .face-box.drop-preview .face-label { background: #dc2626; color: #fff; }
+  .face-box.drop-preview-hide { display: none !important; }
+  /* Hover preview for "validate N named": green outline on the boxes that
+     would be marked validated, no other restyling of the rest. */
+  .face-box.validate-preview { border-color: #16a34a !important; box-shadow: 0 0 0 2px rgba(22,163,74,0.45); }
+  .face-box.validate-preview .face-label { background: #16a34a; color: #fff; }
   .face-box:hover { box-shadow: 0 0 0 4px rgba(255,255,255,0.25); }
   .face-box .face-label {
     position: absolute; bottom: -22px; left: 0; padding: 1px 6px; font-size: 11px;

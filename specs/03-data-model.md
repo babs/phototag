@@ -74,7 +74,20 @@ CREATE TABLE faces (
     embedding    BLOB NOT NULL,
     dim          INTEGER NOT NULL,
     model_name   TEXT NOT NULL,
-    landmarks_json TEXT
+    landmarks_json TEXT,
+    verified     INTEGER                       -- v5: 1 passed / 0 suspect / NULL untested
+);
+-- v6: audit trail of every user-driven correction. Survives the deletion of
+-- the face/image rows it describes (no FK on face_id/image_id on purpose).
+-- Wiped by `phototag faces purge` unless --keep-identities is set.
+CREATE TABLE face_corrections (
+    id          INTEGER PRIMARY KEY,
+    face_id     INTEGER,
+    image_id    INTEGER,
+    action      TEXT NOT NULL,                 -- 'named' | 'unassigned' | 'deleted'
+    cluster_id  INTEGER,
+    name        TEXT,
+    created_at  TEXT NOT NULL
 );
 CREATE TABLE face_runs (
     id INTEGER PRIMARY KEY,

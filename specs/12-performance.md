@@ -36,7 +36,7 @@
 
 ## Targets
 
-- **No memory ceiling on library size**: streaming pipeline, never load all images at once.
+- **Bounded memory under load**: pipeline holds at most one decoded batch + the prefetch queue (currently 2 batches deep) in RAM. The full path list (and DB row list for embed) is materialized up-front — bytes per row are tiny, so this is fine up to ~10⁶ rows; cursor-based streaming is a future optimization if that ceiling is hit.
 - **Resumable**: a `Ctrl-C` mid-scan must not lose committed progress. Per-batch transactions enforce this.
 - **GPU saturation > 80%** when batch size auto-tunes correctly. Monitor via `nvidia-smi` during dev.
 - **DB write contention**: single writer process, batch transactions. WAL mode.

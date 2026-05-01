@@ -37,6 +37,10 @@
 - **UMAP** — BSD.
 - All currently compatible with permissive distribution.
 
+## UI exposure
+
+- **No auth on the FastAPI UI.** Endpoints serve every photo on disk by integer id. Default bind is `127.0.0.1`. Running `phototag serve --host 0.0.0.0` exposes the library + DELETE/POST mutations to the LAN; the CLI emits a `non_loopback_bind` warning on start, but the user owns the consequence past that point. CORS is restricted to localhost origins so a browser tab on another origin cannot call the API directly.
+
 ## Operational
 
 - **Disk full mid-scan** — fail fast, no silent retry. WAL mode keeps DB consistent.
