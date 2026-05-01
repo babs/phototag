@@ -1639,9 +1639,15 @@ async function showPersonByName(name) {
         row.appendChild(html('<div class="empty">no faces</div>'));
       } else {
         for (const f of faces) {
+          // Label distance with its scale (see store v9 / spec #16): UMAP
+          // Euclidean and cosine_dist are different ranges, so the bare
+          // number alone was misleading when a person mixed both kinds.
+          const kind = f.distance_kind === 'cosine_dist' ? 'cos'
+                     : f.distance_kind === 'euclidean_umap' ? 'umap'
+                     : '?';
           const cell = html(`<div class="fringe-cell">
             <img loading="lazy" src="/face-thumb/${f.face_id}" alt="">
-            <div class="fringe-meta">d=${Number(f.distance).toFixed(2)}</div>
+            <div class="fringe-meta">d=${Number(f.distance).toFixed(2)} (${kind})</div>
           </div>`);
           cell.addEventListener('click', () => openLightbox(f.image_id));
           row.appendChild(cell);

@@ -34,7 +34,7 @@ mechanism, an effort estimate, and a status. **Status legend**: 🟢 shipped,
 |---|---|---|---|---|
 | 14 | Vectorized cosine for bulk attach | 🟢 | 1 h | one `(N, D) @ (D, M)` matmul; ~50× faster than the per-face Python loop |
 | 15 | Identity `n_samples` cap for blend | 🟢 | 0.5 h | `IDENTITY_SAMPLE_CAP=200` applied at every blend site (`cluster_faces`, `cluster_orphan_faces`, `attach_face_to_best_identity`, `merge_face_identities`); raw `n_samples` counter preserved for display |
-| 16 | `cluster_assignments.distance` metric coherence | ⬜ | 4 h | mixes Euclidean (UMAP) and cosine (manual). Either normalize to z-score within cluster or add a `distance_kind` column |
+| 16 | `cluster_assignments.distance` metric coherence | 🟢 | 4 h | v9 migration adds `face_cluster_assignments.distance_kind` ('euclidean_umap' \| 'cosine_dist'); `assign_face_to_cluster` records the kind, API surfaces it, fringe view labels it (`d=0.18 (umap)` / `d=0.14 (cos)`). Cluster-member ORDER BY left as-is on purpose — the visible kind tag is the fix, not a re-sort |
 | 17 | `face_corrections` retention compactor | 🟢 | 0.5 h | `phototag faces corrections-compact [--apply]` collapses to one row per face_id (most-recent wins); mirrors the dedup the sticky pass does anyway |
 | 18 | Sticky-pass scan budget | 🟢 | 0.5 h | SQL filter to `action IN ('named','unassigned')`; per-face dedup tightened so `verified` rows can't mask older `named` |
 
@@ -83,19 +83,13 @@ UI:
 - "?" keyboard help overlay
 - N — jump to next unidentified
 
-Specs aligned: 02 (Python 3.14), 03 (v5/v6/v7 schema), 09 (full CLI),
+Specs aligned: 02 (Python 3.14), 03 (v5/v6/v7/v9 schema), 09 (full CLI),
 11 (roadmap status), 12 (memory budget), 13 (UI exposure), 15 (face API
 + recluster + auto-attach + IoU semantics).
 
 ## Picking the next sprint
 
-Eight items remain (⬜ above). Grouped by ROI on the daily flow:
-
-**Quick polish** (~half a day each):
-- **#16** — distance-metric coherence. UI sorts cluster members by
-  `face_cluster_assignments.distance` but the column mixes Euclidean
-  (UMAP) and cosine-derived (manual). Either normalize per-cluster or
-  add a `distance_kind` column. Cosmetic until you start sorting by it.
+Seven items remain (⬜ above). Grouped by ROI on the daily flow:
 
 **Matching quality** (1 day each):
 - **#4** — per-identity threshold tuning. Use the per-attach sim
@@ -125,7 +119,5 @@ Eight items remain (⬜ above). Grouped by ROI on the daily flow:
 - **#25** — JS bundling / module split. `static/ui.js` is past 1500
   lines; esbuild + module split before the next big UI feature.
 
-Recommended next pick if you want one half-day item: **#16** (cleans up
-a long-standing inconsistency that will start mattering as the UI grows
-sort/filter by distance). For a focused day: **#22** XMP writer (the
+Recommended next pick for a focused day: **#22** XMP writer (the
 last v2 leftover that affects everyday use).

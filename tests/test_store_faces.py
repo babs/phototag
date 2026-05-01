@@ -71,12 +71,25 @@ def test_face_run_and_assignment(tmp_db: Path) -> None:
         face_id = _add_face(store, img)
         run = store.create_face_run({"manual": True}, _now())
         cid = store.add_face_cluster(run_id=run, cluster_no=0, size=1, label_auto="x", label_user="Anne")
+        # Default kind = 'euclidean_umap' (matches the cluster_faces path).
         store.assign_face_to_cluster(face_id, cid, distance=0.0)
 
         # Round-trip
         rows = store.list_faces_for_image(img)
         assert rows[0]["cluster_id"] == cid
         assert rows[0]["label_user"] == "Anne"
+        # v9: distance_kind round-trips via list_faces_for_image and
+        # face_cluster_members.
+        assert rows[0]["distance_kind"] == "euclidean_umap"
+        members = store.face_cluster_members(cid)
+        assert members[0]["distance_kind"] == "euclidean_umap"
+
+        # Explicit cosine_dist write also round-trips.
+        face_id2 = _add_face(store, img, bbox=[20, 20, 30, 30])
+        store.assign_face_to_cluster(face_id2, cid, distance=0.2, distance_kind="cosine_dist")
+        kinds = {m["face_id"]: m["distance_kind"] for m in store.face_cluster_members(cid)}
+        assert kinds[face_id] == "euclidean_umap"
+        assert kinds[face_id2] == "cosine_dist"
 
         people = store.list_named_people()
         assert len(people) == 1
@@ -284,6 +297,28 @@ def test_attach_face_to_best_identity(tmp_db: Path) -> None:
             model_name="m",
         )
         assert attach_face_to_best_identity(store, fid5, np.array([1.0, 0.0, 0.0], dtype=np.float32)) is None
+    finally:
+        store.close()
+
+
+def test_attach_face_to_best_identity_writes_cosine_kind(tmp_db: Path) -> None:
+    """v9: manual / auto-attach paths must record distance_kind='cosine_dist'
+    so the UI can format the value on a different scale than UMAP-Euclidean."""
+    from phototag.faces import attach_face_to_best_identity
+
+    store = Store(tmp_db)
+    try:
+        anne = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        store.upsert_face_identity("Anne", anne, n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+        emb = np.array([0.95, 0.05, 0.0], dtype=np.float32)
+        fid = store.insert_face(
+            image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=emb, model_name="m"
+        )
+        hit = attach_face_to_best_identity(store, fid, emb, image_id=img)
+        assert hit is not None
+        rows = store.list_faces_for_image(img)
+        assert rows[0]["distance_kind"] == "cosine_dist"
     finally:
         store.close()
 

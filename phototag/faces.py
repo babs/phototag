@@ -782,9 +782,14 @@ def attach_face_to_best_identity(
         "SELECT id, size FROM face_clusters WHERE run_id=? AND label_user=?",
         (manual_run_id, best_name),
     ).fetchone()
+    # distance_kind='cosine_dist' so UI / sorting can distinguish the
+    # cosine-derived value here (1.0 - cosine_sim, 0..1 range) from the
+    # UMAP-Euclidean distance written by the cluster passes (see store v9).
     if crow:
         cid = int(crow["id"])
-        store.assign_face_to_cluster(face_id, cid, distance=float(1.0 - best_sim))
+        store.assign_face_to_cluster(
+            face_id, cid, distance=float(1.0 - best_sim), distance_kind="cosine_dist"
+        )
         store.conn.execute("UPDATE face_clusters SET size = size + 1 WHERE id = ?", (cid,))
     else:
         max_no = store.conn.execute(
@@ -799,7 +804,9 @@ def attach_face_to_best_identity(
             label_auto=best_name,
             label_user=best_name,
         )
-        store.assign_face_to_cluster(face_id, cid, distance=float(1.0 - best_sim))
+        store.assign_face_to_cluster(
+            face_id, cid, distance=float(1.0 - best_sim), distance_kind="cosine_dist"
+        )
 
     # Sample-weighted centroid update — cap the prior weight so identities
     # keep drifting on fresh evidence (see IDENTITY_SAMPLE_CAP).

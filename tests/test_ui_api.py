@@ -275,7 +275,16 @@ def test_by_name_edge_view(client: TestClient, seeded_db: Path) -> None:
     assert rows[1]["face_id"] == f_mid
     # Each row carries the per-face triage payload.
     for row in rows:
-        for k in ("face_id", "image_id", "path", "bbox", "distance", "cluster_id", "cluster_no"):
+        for k in (
+            "face_id",
+            "image_id",
+            "path",
+            "bbox",
+            "distance",
+            "distance_kind",
+            "cluster_id",
+            "cluster_no",
+        ):
             assert k in row
 
 

@@ -160,6 +160,22 @@ MIGRATIONS: list[str] = [
         SELECT DISTINCT tag_id FROM image_tags WHERE model_name = 'geo_v1'
     );
     """,
+    """
+    -- v9: face_cluster_assignments.distance was historically polluted with
+    -- two incomparable scales: Euclidean distance in UMAP-reduced space
+    -- (from `cluster_faces` / `cluster_orphan_faces`, range ~0–10) and the
+    -- cosine-derived `1.0 - cosine_sim` written by manual / bulk-attach paths
+    -- (range 0–2). Sorting by `distance` across a mixed cluster was therefore
+    -- meaningless. distance_kind makes the scale explicit so the UI / API can
+    -- format and (eventually) sort correctly.
+    --   'euclidean_umap' — distance in UMAP space (cluster_faces & friends)
+    --   'cosine_dist'    — 1.0 - cosine_sim (manual / auto-attach)
+    -- All pre-existing rows came from the UMAP path: manual attaches happened
+    -- through helpers that are being updated in the same change to set the
+    -- kind explicitly, so backfilling 'euclidean_umap' for NULL is safe.
+    ALTER TABLE face_cluster_assignments ADD COLUMN distance_kind TEXT;
+    UPDATE face_cluster_assignments SET distance_kind = 'euclidean_umap' WHERE distance_kind IS NULL;
+    """,
 ]
 
 
@@ -725,6 +741,7 @@ class Store:
                 SELECT
                     fca.face_id,
                     fca.distance AS distance,
+                    fca.distance_kind AS distance_kind,
                     fc.id   AS cluster_id,
                     fc.cluster_no,
                     fc.label_user,
@@ -740,7 +757,7 @@ class Store:
             )
             SELECT f.id, f.bbox_json, f.det_score, f.verified, f.user_verified,
                    r.cluster_id, r.cluster_no, r.label_user, r.label_auto,
-                   r.distance, r.run_params
+                   r.distance, r.distance_kind, r.run_params
             FROM faces f
             LEFT JOIN ranked r ON r.face_id = f.id AND r.rn = 1
             WHERE f.image_id = ?
@@ -775,6 +792,8 @@ class Store:
                     "cluster_no": row["cluster_no"],
                     "label_user": row["label_user"],
                     "label_auto": row["label_auto"],
+                    "distance": distance,
+                    "distance_kind": row["distance_kind"] if "distance_kind" in row.keys() else None,
                     "attach_sim": attach_sim,
                 }
             )
@@ -839,10 +858,22 @@ class Store:
         )
         return int(cur.fetchone()["id"])
 
-    def assign_face_to_cluster(self, face_id: int, cluster_id: int, distance: float) -> None:
+    def assign_face_to_cluster(
+        self,
+        face_id: int,
+        cluster_id: int,
+        distance: float,
+        *,
+        distance_kind: str = "euclidean_umap",
+    ) -> None:
+        # `distance_kind` records which scale `distance` is on so the UI can
+        # render it correctly and a future sort/filter doesn't compare apples
+        # to oranges. Default = the UMAP-Euclidean kind used by the cluster
+        # passes; manual / bulk-attach call sites pass 'cosine_dist'.
         self.conn.execute(
-            "INSERT OR REPLACE INTO face_cluster_assignments(face_id,cluster_id,distance) VALUES(?,?,?)",
-            (face_id, cluster_id, float(distance)),
+            "INSERT OR REPLACE INTO face_cluster_assignments"
+            "(face_id,cluster_id,distance,distance_kind) VALUES(?,?,?,?)",
+            (face_id, cluster_id, float(distance), distance_kind),
         )
 
     def latest_face_run(self) -> int | None:
@@ -1571,8 +1602,13 @@ class Store:
         return dict(row) if row else None
 
     def face_cluster_members(self, cluster_id: int, *, limit: int | None = None) -> list[dict[str, Any]]:
+        # NOTE: ORDER BY fca.distance ASC is kept for backward compatibility,
+        # but if a cluster mixes distance_kinds (UMAP-Euclidean vs cosine_dist
+        # — see migration v9) the ordering is meaningless. The post-#16 fix is
+        # the visible kind tag in the UI, not a re-sort here.
         sql = """
-            SELECT f.id AS face_id, f.image_id, f.bbox_json, f.det_score, fca.distance, i.path
+            SELECT f.id AS face_id, f.image_id, f.bbox_json, f.det_score,
+                   fca.distance, fca.distance_kind, i.path
             FROM face_cluster_assignments fca
             JOIN faces f ON f.id = fca.face_id
             JOIN images i ON i.id = f.image_id
@@ -1603,7 +1639,7 @@ class Store:
         """
         sql = """
             SELECT f.id AS face_id, f.image_id, f.bbox_json, fca.distance,
-                   fca.cluster_id, fc.cluster_no, i.path
+                   fca.distance_kind, fca.cluster_id, fc.cluster_no, i.path
             FROM face_cluster_assignments fca
             JOIN face_clusters fc ON fc.id = fca.cluster_id
             JOIN faces f ON f.id = fca.face_id
