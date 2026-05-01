@@ -62,6 +62,18 @@ class FaceIdentityMergeRequest(BaseModel):
     loser: str
 
 
+class CategoryNameRequest(BaseModel):
+    name: str
+
+
+class TagBindRequest(BaseModel):
+    tag: str
+
+
+class ClusterBindRequest(BaseModel):
+    cluster_id: int
+
+
 def _store(app: FastAPI) -> Store:
     s = getattr(app.state, "store", None)
     if s is None:
@@ -1205,6 +1217,107 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 log.warning("face_thumb_failed", face_id=face_id, error=str(e))
                 raise HTTPException(status_code=500, detail="thumb failed") from e
         return FileResponse(dst, media_type="image/jpeg", headers=_CACHE_HEADERS)
+
+    # ---- categories (#23 UI) -----------------------------------------------
+    # Mirrors the `phototag category` CLI surface: list, add, remove, plus rule
+    # bind/unbind for both tag→category and face_cluster→category. The xmp
+    # writer reads the same rules to populate `lr:HierarchicalSubject`.
+
+    @app.get("/api/categories")
+    def api_categories_list() -> list[dict[str, Any]]:
+        s = _store(app)
+        cats = s.list_categories()
+        # Cheap aggregate counts so the panel can show "(3 tag rules)" badges
+        # without a per-row roundtrip.
+        tag_rules = s.list_tag_category_rules()
+        cluster_rules = s.list_cluster_category_rules()
+        n_tag = {c["name"]: 0 for c in cats}
+        n_cluster = {c["name"]: 0 for c in cats}
+        for r in tag_rules:
+            n_tag[r["category"]] = n_tag.get(r["category"], 0) + 1
+        for r in cluster_rules:
+            n_cluster[r["category"]] = n_cluster.get(r["category"], 0) + 1
+        return [
+            {
+                "id": int(c["id"]),
+                "name": c["name"],
+                "n_tag_rules": n_tag.get(c["name"], 0),
+                "n_cluster_rules": n_cluster.get(c["name"], 0),
+            }
+            for c in cats
+        ]
+
+    @app.post("/api/categories", status_code=201)
+    def api_categories_add(body: CategoryNameRequest) -> dict[str, Any]:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name required")
+        s = _store(app)
+        with s.transaction():
+            cid = s.add_category(name)
+        return {"id": cid, "name": name}
+
+    @app.delete("/api/categories/{name}")
+    def api_categories_delete(name: str) -> dict[str, Any]:
+        s = _store(app)
+        with s.transaction():
+            n = s.delete_category(name)
+        if n == 0:
+            raise HTTPException(status_code=404, detail="category not found")
+        return {"deleted": n, "name": name}
+
+    @app.get("/api/categories/{name}")
+    def api_categories_detail(name: str) -> dict[str, Any]:
+        s = _store(app)
+        cat = s.get_category_by_name(name)
+        if cat is None:
+            raise HTTPException(status_code=404, detail="category not found")
+        # Filter the global rule lists down to this category. Cheap because
+        # rule tables are tiny relative to image_tags / face_cluster_assignments.
+        tag_rules = [r for r in s.list_tag_category_rules() if r["category"] == name]
+        cluster_rules = [r for r in s.list_cluster_category_rules() if r["category"] == name]
+        return {
+            "id": int(cat["id"]),
+            "name": cat["name"],
+            "tag_rules": tag_rules,
+            "cluster_rules": cluster_rules,
+        }
+
+    @app.post("/api/categories/{name}/rules/tag")
+    def api_categories_bind_tag(name: str, body: TagBindRequest) -> dict[str, Any]:
+        s = _store(app)
+        try:
+            with s.transaction():
+                s.map_tag_to_category(body.tag, name)
+        except KeyError as e:
+            # Unknown tag or unknown category — both are user-input errors,
+            # surface as 404 so the JS can show the message inline.
+            raise HTTPException(status_code=404, detail=str(e).strip("'\"")) from e
+        return {"category": name, "tag": body.tag}
+
+    @app.post("/api/categories/{name}/rules/cluster")
+    def api_categories_bind_cluster(name: str, body: ClusterBindRequest) -> dict[str, Any]:
+        s = _store(app)
+        try:
+            with s.transaction():
+                s.map_face_cluster_to_category(body.cluster_id, name)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e).strip("'\"")) from e
+        return {"category": name, "cluster_id": body.cluster_id}
+
+    @app.delete("/api/categories/rules/tag/{tag_name}")
+    def api_categories_unbind_tag(tag_name: str) -> dict[str, Any]:
+        s = _store(app)
+        with s.transaction():
+            n = s.unmap_tag(tag_name)
+        return {"removed": n, "tag": tag_name}
+
+    @app.delete("/api/categories/rules/cluster/{cluster_id}")
+    def api_categories_unbind_cluster(cluster_id: int) -> dict[str, Any]:
+        s = _store(app)
+        with s.transaction():
+            n = s.unmap_face_cluster(cluster_id)
+        return {"removed": n, "cluster_id": cluster_id}
 
     return app
 

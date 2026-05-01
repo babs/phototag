@@ -191,8 +191,81 @@ export function switchView(view) {
     else loadClusters();
   } else if (view === 'faces') {
     showFacesPanel();
+  } else if (view === 'categories') {
+    showCategoriesPanel();
   }
   writeHashRef();
+}
+
+// ---- categories panel (#23 UI half) -------------------------------------
+// Sidebar list of user categories (with rule counts); workspace shows the
+// per-category rule editor when one is clicked.
+export async function showCategoriesPanel() {
+  $('cluster-pane-title').textContent = 'categories';
+  const root = $('cluster-list');
+  root.innerHTML = '<div class="empty" style="padding:12px;">loading…</div>';
+  let cats = [];
+  try {
+    cats = await api('/api/categories');
+  } catch (e) {
+    root.innerHTML = `<div class="empty" style="padding:12px;">failed: ${escape(e.message)}</div>`;
+    return;
+  }
+  const countSpan = document.getElementById('categories-count');
+  if (countSpan) countSpan.textContent = cats.length ? `(${cats.length})` : '';
+  root.innerHTML = '';
+
+  // Inline "+ new" form pinned at the top so adding a category doesn't
+  // require leaving the panel.
+  const addRow = html(`<div style="padding:6px 10px; display:flex; gap:6px; align-items:center; border-bottom:1px solid var(--border);">
+    <input id="new-category-input" type="text" placeholder="new category…" autocomplete="off"
+           style="flex:1; padding:4px 7px; border:1px solid var(--border); border-radius:4px; font-size:12px;">
+    <button id="new-category-add" type="button"
+            style="padding:4px 10px; border:1px solid var(--border); border-radius:4px; background:#fff; cursor:pointer; font-size:12px;">add</button>
+  </div>`);
+  root.appendChild(addRow);
+  const submitNewCategory = async () => {
+    const inp = $('new-category-input');
+    const name = inp.value.trim();
+    if (!name) return;
+    try {
+      await api('/api/categories', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name}),
+      });
+    } catch (e) {
+      alert('add failed: ' + e.message);
+      return;
+    }
+    inp.value = '';
+    showCategoriesPanel();
+  };
+  $('new-category-add').onclick = submitNewCategory;
+  $('new-category-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitNewCategory(); }
+  });
+
+  if (!cats.length) {
+    root.appendChild(html('<div class="empty" style="padding:12px;">no categories yet — add one above</div>'));
+    return;
+  }
+  for (const c of cats) {
+    const row = html(`<div class="cluster-row" data-name="${escape(c.name)}" style="cursor:pointer;">
+      <span class="lbl"><b>${escape(c.name)}</b></span>
+      <span style="color:var(--muted); font-size:11px;">
+        ${c.n_tag_rules} tag${c.n_tag_rules === 1 ? '' : 's'} · ${c.n_cluster_rules} cluster${c.n_cluster_rules === 1 ? '' : 's'}
+      </span>
+    </div>`);
+    row.addEventListener('click', async () => {
+      document.querySelectorAll('.cluster-row').forEach(r => r.classList.remove('selected'));
+      row.classList.add('selected');
+      // Lazy import to avoid the workspace ↔ sidebar import cycle.
+      const m = await import('./workspace.js');
+      m.showCategoryDetail(c.name);
+    });
+    root.appendChild(row);
+  }
 }
 
 export async function showFacesPanel() {

@@ -600,6 +600,144 @@ async function groupMerge(loser, survivor) {
   await showPersonByName(survivor);
 }
 
+// ---- categories detail (#23 UI) -----------------------------------------
+// Renders the rule editor for one category: tag-bind autocomplete, cluster-
+// bind via a free-form id field, and an unmap button per existing rule.
+export async function showCategoryDetail(name) {
+  const ws = $('workspace');
+  ws.innerHTML = '<div class="empty">loading…</div>';
+  let data;
+  try {
+    data = await api(`/api/categories/${encodeURIComponent(name)}`);
+  } catch (e) {
+    ws.innerHTML = `<div class="empty">failed: ${escape(e.message)}</div>`;
+    return;
+  }
+  ws.innerHTML = '';
+  ws.appendChild(html(`<h2>📁 ${escape(data.name)} <button id="category-delete" class="pen-btn" title="delete this category">🗑️</button></h2>`));
+  ws.appendChild(html(`<div class="auto">XMP sidecars get <code>${escape(data.name)}|&lt;subject&gt;</code> as a hierarchical keyword.</div>`));
+
+  $('category-delete').addEventListener('click', async () => {
+    if (!confirm(`Delete category "${name}" and all ${data.tag_rules.length + data.cluster_rules.length} rule(s)?`)) return;
+    try {
+      await api(`/api/categories/${encodeURIComponent(name)}`, {method: 'DELETE'});
+    } catch (e) { alert('delete failed: ' + e.message); return; }
+    // Refresh sidebar; clear workspace.
+    const m = await import('./sidebar.js');
+    await m.showCategoriesPanel();
+    ws.innerHTML = '<div class="empty">category deleted</div>';
+  });
+
+  // ---- tag rules ---------------------------------------------------------
+  ws.appendChild(html('<h3 style="margin:18px 0 6px; font-size:14px;">tag rules</h3>'));
+  const tagWrap = html('<div style="display:flex;flex-direction:column;gap:4px;max-width:520px;"></div>');
+  for (const r of data.tag_rules) {
+    const row = html(`<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border:1px solid var(--border);border-radius:4px;">
+      <span><code>${escape(r.tag)}</code></span>
+      <button type="button" class="pen-btn" title="unmap" style="font-size:14px;">×</button>
+    </div>`);
+    row.querySelector('button').addEventListener('click', async () => {
+      try { await api(`/api/categories/rules/tag/${encodeURIComponent(r.tag)}`, {method: 'DELETE'}); }
+      catch (e) { alert('unmap failed: ' + e.message); return; }
+      showCategoryDetail(name);
+    });
+    tagWrap.appendChild(row);
+  }
+  if (!data.tag_rules.length) tagWrap.appendChild(html('<div class="empty">no tag rules yet</div>'));
+  ws.appendChild(tagWrap);
+
+  // Tag bind form: free-form input + datalist sourced from /api/tags so the
+  // user can either type-ahead or paste any known tag name.
+  const tagDatalistId = `category-tag-bind-${Math.random().toString(36).slice(2, 8)}`;
+  const tagAdd = html(`<div style="display:flex;gap:6px;margin-top:6px;max-width:520px;">
+    <input id="category-tag-bind-input" type="text" list="${tagDatalistId}" placeholder="bind tag…"
+           style="flex:1;padding:4px 7px;border:1px solid var(--border);border-radius:4px;font-size:12px;">
+    <datalist id="${tagDatalistId}"></datalist>
+    <button id="category-tag-bind-add" type="button"
+            style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer;font-size:12px;">bind</button>
+  </div>`);
+  ws.appendChild(tagAdd);
+  // Lazy-load tag list on first focus so we don't hit /api/tags every panel open.
+  let tagsLoaded = false;
+  $('category-tag-bind-input').addEventListener('focus', async () => {
+    if (tagsLoaded) return;
+    tagsLoaded = true;
+    try {
+      const tags = await api('/api/tags?limit=500');
+      const dl = document.getElementById(tagDatalistId);
+      if (dl) for (const t of tags) {
+        const opt = document.createElement('option');
+        opt.value = t.name;
+        dl.appendChild(opt);
+      }
+    } catch (e) { /* ignore — input still works as free-form */ }
+  });
+  const submitTagBind = async () => {
+    const tag = $('category-tag-bind-input').value.trim();
+    if (!tag) return;
+    try {
+      await api(`/api/categories/${encodeURIComponent(name)}/rules/tag`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({tag}),
+      });
+    } catch (e) { alert('bind failed: ' + e.message); return; }
+    showCategoryDetail(name);
+  };
+  $('category-tag-bind-add').onclick = submitTagBind;
+  $('category-tag-bind-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitTagBind(); }
+  });
+
+  // ---- cluster rules -----------------------------------------------------
+  ws.appendChild(html('<h3 style="margin:18px 0 6px; font-size:14px;">face-cluster rules</h3>'));
+  const clWrap = html('<div style="display:flex;flex-direction:column;gap:4px;max-width:520px;"></div>');
+  for (const r of data.cluster_rules) {
+    const lbl = r.label_user ? `<b>${escape(r.label_user)}</b>` : `<span style="color:var(--muted);">cluster #${r.cluster_no}</span>`;
+    const row = html(`<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border:1px solid var(--border);border-radius:4px;">
+      <span>${lbl} <span style="color:var(--muted);font-size:11px;">id ${r.cluster_id}</span></span>
+      <button type="button" class="pen-btn" title="unmap" style="font-size:14px;">×</button>
+    </div>`);
+    row.querySelector('button').addEventListener('click', async () => {
+      try { await api(`/api/categories/rules/cluster/${r.cluster_id}`, {method: 'DELETE'}); }
+      catch (e) { alert('unmap failed: ' + e.message); return; }
+      showCategoryDetail(name);
+    });
+    clWrap.appendChild(row);
+  }
+  if (!data.cluster_rules.length) clWrap.appendChild(html('<div class="empty">no cluster rules yet</div>'));
+  ws.appendChild(clWrap);
+
+  // TODO: when this UI grows beyond bookkeeping, swap the raw cluster-id
+  // input for a label-search datalist sourced from `/api/people/names`.
+  // For now, single-user admin use justifies the integer-id field —
+  // the user copies the id from the people sidebar.
+  const clAdd = html(`<div style="display:flex;gap:6px;margin-top:6px;max-width:520px;">
+    <input id="category-cluster-bind-input" type="number" min="1" placeholder="bind face-cluster id…"
+           style="flex:1;padding:4px 7px;border:1px solid var(--border);border-radius:4px;font-size:12px;">
+    <button id="category-cluster-bind-add" type="button"
+            style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer;font-size:12px;">bind</button>
+  </div>`);
+  ws.appendChild(clAdd);
+  const submitClusterBind = async () => {
+    const raw = $('category-cluster-bind-input').value.trim();
+    const cluster_id = parseInt(raw, 10);
+    if (!cluster_id || cluster_id <= 0) { alert('cluster id must be a positive integer'); return; }
+    try {
+      await api(`/api/categories/${encodeURIComponent(name)}/rules/cluster`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({cluster_id}),
+      });
+    } catch (e) { alert('bind failed: ' + e.message); return; }
+    showCategoryDetail(name);
+  };
+  $('category-cluster-bind-add').onclick = submitClusterBind;
+  $('category-cluster-bind-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitClusterBind(); }
+  });
+}
+
 // ---- late-bound writeHash ref (set by runs.js to break the import cycle) -
 let writeHashRef = () => {};
 

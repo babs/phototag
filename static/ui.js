@@ -714,14 +714,20 @@
     }
   });
 
-  // static/src/sidebar.js
-  init_state();
-  init_api();
-
   // static/src/workspace.js
-  init_state();
-  init_api();
-  init_lightbox();
+  var workspace_exports = {};
+  __export(workspace_exports, {
+    bindWorkspaceRefs: () => bindWorkspaceRefs,
+    runSearch: () => runSearch,
+    showCategoryDetail: () => showCategoryDetail,
+    showCluster: () => showCluster,
+    showFacesGrid: () => showFacesGrid,
+    showPersonByName: () => showPersonByName,
+    showPersonInWorkspace: () => showPersonInWorkspace,
+    showTriageInWorkspace: () => showTriageInWorkspace,
+    showUnidentifiedInWorkspace: () => showUnidentifiedInWorkspace,
+    viewPerson: () => viewPerson
+  });
   async function showCluster(id) {
     const ws = $("workspace");
     ws.innerHTML = '<div class="empty">loading\u2026</div>';
@@ -1281,13 +1287,184 @@
     await showFacesPanel();
     await showPersonByName(survivor);
   }
-  var writeHashRef2 = () => {
-  };
+  async function showCategoryDetail(name) {
+    const ws = $("workspace");
+    ws.innerHTML = '<div class="empty">loading\u2026</div>';
+    let data;
+    try {
+      data = await api(`/api/categories/${encodeURIComponent(name)}`);
+    } catch (e) {
+      ws.innerHTML = `<div class="empty">failed: ${escape(e.message)}</div>`;
+      return;
+    }
+    ws.innerHTML = "";
+    ws.appendChild(html(`<h2>\u{1F4C1} ${escape(data.name)} <button id="category-delete" class="pen-btn" title="delete this category">\u{1F5D1}\uFE0F</button></h2>`));
+    ws.appendChild(html(`<div class="auto">XMP sidecars get <code>${escape(data.name)}|&lt;subject&gt;</code> as a hierarchical keyword.</div>`));
+    $("category-delete").addEventListener("click", async () => {
+      if (!confirm(`Delete category "${name}" and all ${data.tag_rules.length + data.cluster_rules.length} rule(s)?`)) return;
+      try {
+        await api(`/api/categories/${encodeURIComponent(name)}`, { method: "DELETE" });
+      } catch (e) {
+        alert("delete failed: " + e.message);
+        return;
+      }
+      const m = await Promise.resolve().then(() => (init_sidebar(), sidebar_exports));
+      await m.showCategoriesPanel();
+      ws.innerHTML = '<div class="empty">category deleted</div>';
+    });
+    ws.appendChild(html('<h3 style="margin:18px 0 6px; font-size:14px;">tag rules</h3>'));
+    const tagWrap = html('<div style="display:flex;flex-direction:column;gap:4px;max-width:520px;"></div>');
+    for (const r of data.tag_rules) {
+      const row = html(`<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border:1px solid var(--border);border-radius:4px;">
+      <span><code>${escape(r.tag)}</code></span>
+      <button type="button" class="pen-btn" title="unmap" style="font-size:14px;">\xD7</button>
+    </div>`);
+      row.querySelector("button").addEventListener("click", async () => {
+        try {
+          await api(`/api/categories/rules/tag/${encodeURIComponent(r.tag)}`, { method: "DELETE" });
+        } catch (e) {
+          alert("unmap failed: " + e.message);
+          return;
+        }
+        showCategoryDetail(name);
+      });
+      tagWrap.appendChild(row);
+    }
+    if (!data.tag_rules.length) tagWrap.appendChild(html('<div class="empty">no tag rules yet</div>'));
+    ws.appendChild(tagWrap);
+    const tagDatalistId = `category-tag-bind-${Math.random().toString(36).slice(2, 8)}`;
+    const tagAdd = html(`<div style="display:flex;gap:6px;margin-top:6px;max-width:520px;">
+    <input id="category-tag-bind-input" type="text" list="${tagDatalistId}" placeholder="bind tag\u2026"
+           style="flex:1;padding:4px 7px;border:1px solid var(--border);border-radius:4px;font-size:12px;">
+    <datalist id="${tagDatalistId}"></datalist>
+    <button id="category-tag-bind-add" type="button"
+            style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer;font-size:12px;">bind</button>
+  </div>`);
+    ws.appendChild(tagAdd);
+    let tagsLoaded = false;
+    $("category-tag-bind-input").addEventListener("focus", async () => {
+      if (tagsLoaded) return;
+      tagsLoaded = true;
+      try {
+        const tags = await api("/api/tags?limit=500");
+        const dl = document.getElementById(tagDatalistId);
+        if (dl) for (const t of tags) {
+          const opt = document.createElement("option");
+          opt.value = t.name;
+          dl.appendChild(opt);
+        }
+      } catch (e) {
+      }
+    });
+    const submitTagBind = async () => {
+      const tag = $("category-tag-bind-input").value.trim();
+      if (!tag) return;
+      try {
+        await api(`/api/categories/${encodeURIComponent(name)}/rules/tag`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tag })
+        });
+      } catch (e) {
+        alert("bind failed: " + e.message);
+        return;
+      }
+      showCategoryDetail(name);
+    };
+    $("category-tag-bind-add").onclick = submitTagBind;
+    $("category-tag-bind-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitTagBind();
+      }
+    });
+    ws.appendChild(html('<h3 style="margin:18px 0 6px; font-size:14px;">face-cluster rules</h3>'));
+    const clWrap = html('<div style="display:flex;flex-direction:column;gap:4px;max-width:520px;"></div>');
+    for (const r of data.cluster_rules) {
+      const lbl = r.label_user ? `<b>${escape(r.label_user)}</b>` : `<span style="color:var(--muted);">cluster #${r.cluster_no}</span>`;
+      const row = html(`<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border:1px solid var(--border);border-radius:4px;">
+      <span>${lbl} <span style="color:var(--muted);font-size:11px;">id ${r.cluster_id}</span></span>
+      <button type="button" class="pen-btn" title="unmap" style="font-size:14px;">\xD7</button>
+    </div>`);
+      row.querySelector("button").addEventListener("click", async () => {
+        try {
+          await api(`/api/categories/rules/cluster/${r.cluster_id}`, { method: "DELETE" });
+        } catch (e) {
+          alert("unmap failed: " + e.message);
+          return;
+        }
+        showCategoryDetail(name);
+      });
+      clWrap.appendChild(row);
+    }
+    if (!data.cluster_rules.length) clWrap.appendChild(html('<div class="empty">no cluster rules yet</div>'));
+    ws.appendChild(clWrap);
+    const clAdd = html(`<div style="display:flex;gap:6px;margin-top:6px;max-width:520px;">
+    <input id="category-cluster-bind-input" type="number" min="1" placeholder="bind face-cluster id\u2026"
+           style="flex:1;padding:4px 7px;border:1px solid var(--border);border-radius:4px;font-size:12px;">
+    <button id="category-cluster-bind-add" type="button"
+            style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer;font-size:12px;">bind</button>
+  </div>`);
+    ws.appendChild(clAdd);
+    const submitClusterBind = async () => {
+      const raw = $("category-cluster-bind-input").value.trim();
+      const cluster_id = parseInt(raw, 10);
+      if (!cluster_id || cluster_id <= 0) {
+        alert("cluster id must be a positive integer");
+        return;
+      }
+      try {
+        await api(`/api/categories/${encodeURIComponent(name)}/rules/cluster`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cluster_id })
+        });
+      } catch (e) {
+        alert("bind failed: " + e.message);
+        return;
+      }
+      showCategoryDetail(name);
+    };
+    $("category-cluster-bind-add").onclick = submitClusterBind;
+    $("category-cluster-bind-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitClusterBind();
+      }
+    });
+  }
   function bindWorkspaceRefs(refs) {
     if (refs.writeHash) writeHashRef2 = refs.writeHash;
   }
+  var writeHashRef2;
+  var init_workspace = __esm({
+    "static/src/workspace.js"() {
+      init_state();
+      init_api();
+      init_lightbox();
+      init_sidebar();
+      writeHashRef2 = () => {
+      };
+    }
+  });
 
   // static/src/sidebar.js
+  var sidebar_exports = {};
+  __export(sidebar_exports, {
+    bindSidebarRefs: () => bindSidebarRefs,
+    loadClusters: () => loadClusters,
+    loadFacesSummary: () => loadFacesSummary,
+    loadTopTags: () => loadTopTags,
+    renderActiveFilters: () => renderActiveFilters,
+    renderClusters: () => renderClusters,
+    selectCluster: () => selectCluster,
+    showCategoriesPanel: () => showCategoriesPanel,
+    showFacesPanel: () => showFacesPanel,
+    switchView: () => switchView,
+    togglePerson: () => togglePerson,
+    toggleTag: () => toggleTag,
+    wireSidebarHandlers: () => wireSidebarHandlers
+  });
   async function loadClusters() {
     state.clusters = await api(`/api/runs/${state.runId}/clusters`);
     renderClusters();
@@ -1370,8 +1547,6 @@
     if (state.activeTags.size + state.activePersons.size > 0) await runSearch();
     else if (state.selectedCluster) await showCluster(state.selectedCluster);
   }
-  var tagDropState = { items: [], active: -1 };
-  var tagDebounce = null;
   async function refreshTagDropdown() {
     const q = $("tag-input").value.trim();
     const tagUrl = q.length ? `/api/tags?prefix=${encodeURIComponent(q)}&limit=15` : `/api/tags?limit=15`;
@@ -1451,8 +1626,75 @@
       else loadClusters();
     } else if (view === "faces") {
       showFacesPanel();
+    } else if (view === "categories") {
+      showCategoriesPanel();
     }
     writeHashRef3();
+  }
+  async function showCategoriesPanel() {
+    $("cluster-pane-title").textContent = "categories";
+    const root = $("cluster-list");
+    root.innerHTML = '<div class="empty" style="padding:12px;">loading\u2026</div>';
+    let cats = [];
+    try {
+      cats = await api("/api/categories");
+    } catch (e) {
+      root.innerHTML = `<div class="empty" style="padding:12px;">failed: ${escape(e.message)}</div>`;
+      return;
+    }
+    const countSpan = document.getElementById("categories-count");
+    if (countSpan) countSpan.textContent = cats.length ? `(${cats.length})` : "";
+    root.innerHTML = "";
+    const addRow = html(`<div style="padding:6px 10px; display:flex; gap:6px; align-items:center; border-bottom:1px solid var(--border);">
+    <input id="new-category-input" type="text" placeholder="new category\u2026" autocomplete="off"
+           style="flex:1; padding:4px 7px; border:1px solid var(--border); border-radius:4px; font-size:12px;">
+    <button id="new-category-add" type="button"
+            style="padding:4px 10px; border:1px solid var(--border); border-radius:4px; background:#fff; cursor:pointer; font-size:12px;">add</button>
+  </div>`);
+    root.appendChild(addRow);
+    const submitNewCategory = async () => {
+      const inp = $("new-category-input");
+      const name = inp.value.trim();
+      if (!name) return;
+      try {
+        await api("/api/categories", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name })
+        });
+      } catch (e) {
+        alert("add failed: " + e.message);
+        return;
+      }
+      inp.value = "";
+      showCategoriesPanel();
+    };
+    $("new-category-add").onclick = submitNewCategory;
+    $("new-category-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitNewCategory();
+      }
+    });
+    if (!cats.length) {
+      root.appendChild(html('<div class="empty" style="padding:12px;">no categories yet \u2014 add one above</div>'));
+      return;
+    }
+    for (const c of cats) {
+      const row = html(`<div class="cluster-row" data-name="${escape(c.name)}" style="cursor:pointer;">
+      <span class="lbl"><b>${escape(c.name)}</b></span>
+      <span style="color:var(--muted); font-size:11px;">
+        ${c.n_tag_rules} tag${c.n_tag_rules === 1 ? "" : "s"} \xB7 ${c.n_cluster_rules} cluster${c.n_cluster_rules === 1 ? "" : "s"}
+      </span>
+    </div>`);
+      row.addEventListener("click", async () => {
+        document.querySelectorAll(".cluster-row").forEach((r) => r.classList.remove("selected"));
+        row.classList.add("selected");
+        const m = await Promise.resolve().then(() => (init_workspace(), workspace_exports));
+        m.showCategoryDetail(c.name);
+      });
+      root.appendChild(row);
+    }
   }
   async function showFacesPanel() {
     $("cluster-pane-title").textContent = "people";
@@ -1682,14 +1924,26 @@
       new MutationObserver(schedule).observe(list, { childList: true });
     }
   }
-  var writeHashRef3 = () => {
-  };
   function bindSidebarRefs(refs) {
     if (refs.writeHash) writeHashRef3 = refs.writeHash;
   }
+  var tagDropState, tagDebounce, writeHashRef3;
+  var init_sidebar = __esm({
+    "static/src/sidebar.js"() {
+      init_state();
+      init_api();
+      init_workspace();
+      tagDropState = { items: [], active: -1 };
+      tagDebounce = null;
+      writeHashRef3 = () => {
+      };
+    }
+  });
 
   // static/src/main.js
+  init_sidebar();
   init_lightbox();
+  init_workspace();
 
   // static/src/keyboard.js
   init_state();
@@ -1814,6 +2068,8 @@
   // static/src/runs.js
   init_state();
   init_api();
+  init_sidebar();
+  init_workspace();
   async function loadRuns() {
     state.runs = await api("/api/runs");
     const sel = $("run-select");
@@ -1936,6 +2192,7 @@
   }
 
   // static/src/main.js
+  init_sidebar();
   bindSidebarRefs({ writeHash });
   bindWorkspaceRefs({ writeHash });
   bindLightboxRefs({ writeHash, toggleTag });

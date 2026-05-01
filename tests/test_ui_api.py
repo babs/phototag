@@ -786,3 +786,97 @@ def test_face_identities_merge_same_name_400(client: TestClient, seeded_db: Path
     s.close()
     r = client.post("/api/face-identities/merge", json={"survivor": "Anne", "loser": "Anne"})
     assert r.status_code == 400
+
+
+# ---- categories (#23 UI half) ------------------------------------------
+
+
+def test_categories_crud_and_rule_round_trip(client: TestClient, seeded_db: Path) -> None:
+    """Add → list → bind tag → detail shows rule → unbind → delete."""
+    # `seeded_db` ships with at least the tag `cat`; we'll bind to it.
+    r = client.post("/api/categories", json={"name": "medical"})
+    assert r.status_code == 201, r.text
+    assert r.json() == {"id": 1, "name": "medical"}
+
+    # Empty-name rejected.
+    r = client.post("/api/categories", json={"name": "  "})
+    assert r.status_code == 400
+
+    # List shows the new category with zero rules.
+    r = client.get("/api/categories")
+    assert r.status_code == 200
+    assert r.json() == [{"id": 1, "name": "medical", "n_tag_rules": 0, "n_cluster_rules": 0}]
+
+    # Bind an existing tag.
+    r = client.post("/api/categories/medical/rules/tag", json={"tag": "cat"})
+    assert r.status_code == 200
+    assert r.json() == {"category": "medical", "tag": "cat"}
+
+    # Detail surfaces the bound rule.
+    body = client.get("/api/categories/medical").json()
+    assert body["name"] == "medical"
+    assert body["tag_rules"] == [{"tag": "cat", "category": "medical"}]
+    assert body["cluster_rules"] == []
+
+    # List counts updated.
+    assert client.get("/api/categories").json()[0]["n_tag_rules"] == 1
+
+    # Unbind the rule.
+    r = client.delete("/api/categories/rules/tag/cat")
+    assert r.status_code == 200
+    assert r.json() == {"removed": 1, "tag": "cat"}
+
+    # Delete the category.
+    r = client.delete("/api/categories/medical")
+    assert r.status_code == 200
+    assert r.json() == {"deleted": 1, "name": "medical"}
+
+    # Subsequent delete returns 404.
+    r = client.delete("/api/categories/medical")
+    assert r.status_code == 404
+
+
+def test_categories_bind_unknown_tag_returns_404(client: TestClient) -> None:
+    """Binding an unknown tag exits 404 with the tag name in the detail."""
+    r = client.post("/api/categories", json={"name": "medical"})
+    assert r.status_code == 201
+    r = client.post("/api/categories/medical/rules/tag", json={"tag": "ghost-tag"})
+    assert r.status_code == 404
+    assert "ghost-tag" in r.json()["detail"]
+
+
+def test_categories_detail_404_for_unknown(client: TestClient) -> None:
+    r = client.get("/api/categories/ghost-cat")
+    assert r.status_code == 404
+
+
+def test_categories_bind_cluster_round_trip(client: TestClient, seeded_db: Path) -> None:
+    """Cluster rule round-trip: bind a real face_cluster id, see it surface,
+    unbind it via the dedicated endpoint."""
+    s = Store(seeded_db)
+    run = s.latest_face_run()
+    assert run is not None
+    cid = s.add_face_cluster(run_id=run, cluster_no=42, size=1, label_user="Anne", label_auto="Anne")
+    s.close()
+
+    r = client.post("/api/categories", json={"name": "family"})
+    assert r.status_code == 201
+    r = client.post("/api/categories/family/rules/cluster", json={"cluster_id": cid})
+    assert r.status_code == 200
+    assert r.json() == {"category": "family", "cluster_id": cid}
+
+    detail = client.get("/api/categories/family").json()
+    assert len(detail["cluster_rules"]) == 1
+    assert detail["cluster_rules"][0]["cluster_id"] == cid
+    assert detail["cluster_rules"][0]["label_user"] == "Anne"
+
+    r = client.delete(f"/api/categories/rules/cluster/{cid}")
+    assert r.status_code == 200
+    assert r.json() == {"removed": 1, "cluster_id": cid}
+
+
+def test_categories_bind_unknown_cluster_returns_404(client: TestClient) -> None:
+    r = client.post("/api/categories", json={"name": "family"})
+    assert r.status_code == 201
+    r = client.post("/api/categories/family/rules/cluster", json={"cluster_id": 99999})
+    assert r.status_code == 404

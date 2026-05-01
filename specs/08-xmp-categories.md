@@ -1,4 +1,12 @@
-# 08 — XMP sidecars & user categories (v2)
+# 08 — XMP sidecars & user categories
+
+**Status — shipped.** XMP writer (`phototag xmp write/clean`) +
+category CLI (`phototag category add/rm/list/map/unmap`) + in-app
+categories view (sidebar third tab). v11 schema migration adds
+`categories`, `tag_category_map`, `cluster_categories` tables.
+`phototag xmp write --apply` emits both `dc:Subject` (flat keywords)
+and `lr:HierarchicalSubject` (`category|subject` paths) and is
+idempotent against the existing sidecar (mtime + content gate).
 
 ## Goal
 
@@ -63,23 +71,49 @@ categories" section below.
 
 ### Mapping rules
 
-Three sources, in order:
+Two rule sources, in precedence order:
 
-1. **Cluster → category** — copy validated cluster `label_user` as a category, all images in that cluster get that category.
-2. **Tag → category** — explicit map (`tag_category_map`), e.g., `{x-ray, mri, ultrasound} → medical`.
-3. **Manual override** — `phototag tag <image> --category medical` for individual fixes.
+1. **Cluster → category** — `cluster_categories` row binds a face_cluster
+   to a category. Every image carrying a face from that cluster picks up
+   the category in its hierarchical keyword set.
+2. **Tag → category** — `tag_category_map` row binds a tag (RAM++ or
+   manual) to a category. Every image carrying that tag picks it up.
 
-Conflict resolution: cluster wins over tag rule, manual wins over both.
+Cluster rules win over tag rules when both apply (the cluster signal is
+human-confirmed, the tag is a model prediction). Per-image manual
+overrides are intentionally NOT shipped — the two-rule model covers the
+real-world case and the schema can be extended later if the need shows
+up. UNIQUE on `(tag_id)` and `(cluster_id)` enforces "one rule per
+target": a tag/cluster maps to at most one category.
 
 ### CLI
 
 ```
 phototag category add medical
+phototag category rm medical
+phototag category list                       # JSON: categories + rules
 phototag category map --tag x-ray --category medical
-phototag category map --cluster 7 --category medical
-phototag category list
-phototag category apply           # rebuild image→category from rules
+phototag category map --cluster 7 --category family
+phototag category unmap --tag x-ray
+phototag category unmap --cluster 7
 ```
+
+Rules are read on every `phototag xmp write --apply` — there is no
+"apply" / cache step to invalidate. `Store.categories_for_image()` does
+the union resolve at write time.
+
+### UI
+
+Sidebar third view **categories** (next to clusters / faces). Inline
+"+ new" form to create a category. Clicking a category opens the
+workspace rule editor: bound tag rows + bound cluster rows (each with
+an unmap × button), tag-bind input with `/api/tags`-sourced datalist
+autocomplete, cluster-id-bind numeric input, and a 🗑️ button to drop
+the category (cascades through both rule tables via FK ON DELETE).
+Endpoints: `GET/POST /api/categories`,
+`DELETE /api/categories/{name}`, `GET /api/categories/{name}`,
+`POST /api/categories/{name}/rules/{tag,cluster}`,
+`DELETE /api/categories/rules/{tag,cluster}/{key}`.
 
 ## Idempotence
 

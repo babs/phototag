@@ -34,7 +34,9 @@ embeddings never leave the machine. Wipeable in one command.
 - **v2 — Productivity**: faces shipped (detect, cluster, validate,
   identity merge, hard-negative cannot-link, sticky corrections,
   triage queue, edge gallery, vectorized auto-attach). XMP sidecars
-  and user-defined categories still pending.
+  + user categories shipped: `phototag xmp write/clean`,
+  `phototag category add/rm/list/map/unmap`, plus an in-app categories
+  editor that drives `lr:HierarchicalSubject` on save.
 
 Live status table: [`specs/16-improvement-plan.md`](specs/16-improvement-plan.md).
 
@@ -116,6 +118,14 @@ Live status table: [`specs/16-improvement-plan.md`](specs/16-improvement-plan.md
   Example: `uv run phototag xmp write ./data/pictures --apply --include-people`.
 - `phototag xmp clean PATH [--apply]` — remove every sidecar under
   PATH (default dry-run).
+- `phototag category add/rm/list/map/unmap` — manage user categories
+  that drive `lr:HierarchicalSubject` (the keyword-tree field digiKam /
+  Lightroom show as a folder hierarchy). Bind tags or face-clusters to
+  a category; on the next `phototag xmp write --apply` each photo gets
+  hierarchical entries shaped `category|subject` for every applicable
+  rule. Cluster rules win over tag rules. The same surface is editable
+  in-app via the sidebar **categories** view. See
+  [`specs/08-xmp-categories.md`](specs/08-xmp-categories.md).
 
 ## Install
 
@@ -300,7 +310,8 @@ end-of-file-fixer, check-yaml/toml.
 - [`06-search.md`](specs/06-search.md) — semantic search
 - [`07-reporting.md`](specs/07-reporting.md) — HTML report
 - [`08-xmp-categories.md`](specs/08-xmp-categories.md) — XMP sidecars
-  + categories (pending impl)
+  + user categories (shipped: `phototag xmp` + `phototag category` CLIs,
+  in-app rule editor)
 - [`09-cli.md`](specs/09-cli.md) — CLI surface
 - [`10-project-structure.md`](specs/10-project-structure.md) — repo layout
 - [`11-roadmap.md`](specs/11-roadmap.md) — milestones, status

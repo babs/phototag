@@ -100,7 +100,36 @@ uv run phototag exif-backfill                          # extract EXIF for legacy
 uv run phototag geo-tag                                # reverse-geocode GPS into city/country tags
 ```
 
-## 7. Optional: shared-secret auth (when binding non-loopback)
+## 7. Categories + XMP sidecars (digiKam / Lightroom interop)
+
+Tags + face labels stay in the SQLite DB by default. To make them
+readable in external photo apps, write them to `<image>.xmp` sidecars
+next to each photo:
+
+```sh
+uv run phototag xmp write ./data/pictures --apply --include-people
+```
+
+That writes flat keywords (`dc:Subject`). For a folder-style keyword
+*tree* (`medical/x-ray`, `family/Anne`, …) digiKam-style apps read
+from the `lr:HierarchicalSubject` field, group your tags + face
+clusters into named **categories** first:
+
+```sh
+uv run phototag category add medical
+uv run phototag category map --tag x-ray --category medical
+uv run phototag category map --cluster 7 --category family
+uv run phototag category list
+```
+
+Or do all of that point-and-click in the UI: the sidebar's
+**categories** view (third tab) lists rules, lets you add/remove
+them, and binds tags via an autocomplete sourced from your live tag
+set. The next `xmp write --apply` materializes
+`category|subject` entries in every applicable sidecar.
+Spec: [`specs/08-xmp-categories.md`](specs/08-xmp-categories.md).
+
+## 8. Optional: shared-secret auth (when binding non-loopback)
 
 The default `--host 127.0.0.1` is auth-free. Binding to LAN
 (`--host 0.0.0.0`) exposes every photo by integer id; gate it with a
@@ -122,7 +151,7 @@ The middleware uses `secrets.compare_digest`. CORS preflight passes
 through. The SPA injects the token automatically into fetch + asset
 URLs from the rendered template.
 
-## 8. Daily-use cheat sheet
+## 9. Daily-use cheat sheet
 
 ```sh
 # I added new photos to the library
@@ -143,7 +172,7 @@ uv run phototag doctor --fix
 uv run phototag prune --apply
 ```
 
-## 9. Where things live
+## 10. Where things live
 
 - `data/` — gitignored; DBs (`*.db`), model weights, EXIF cache, thumbs,
   preview JPEGs, face thumbnails, server logs, backups.
@@ -157,7 +186,7 @@ uv run phototag prune --apply
   first to fetch esbuild). Bundle output is committed; `node_modules/` is
   gitignored.
 
-## 10. Configuration
+## 11. Configuration
 
 `.env` overrides (`APP_` prefix, pydantic-settings):
 

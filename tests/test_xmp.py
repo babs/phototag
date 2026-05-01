@@ -210,3 +210,65 @@ def test_xmp_write_emits_hierarchical_categories(tmp_path: Path, monkeypatch: py
     if isinstance(hier, str):
         hier = [hier]
     assert hier == ["medical|x-ray"], hier
+
+
+def test_xmp_write_emits_hierarchical_for_cluster_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cluster→category rules must surface in `lr:HierarchicalSubject` the
+    same way tag→category rules do — `category|<face label>` per face row
+    on the image. Mirrors the tag-rule test above so the cluster branch
+    in `_collect_image_plans` doesn't regress silently. (#23 cluster path)"""
+    import numpy as np
+
+    db = tmp_path / "phototag.db"
+    img = tmp_path / "scene.jpg"
+    _make_jpeg(img)
+    s = Store(db)
+    image_id = s.upsert_image(
+        path=str(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
+    )
+    # Build a face cluster carrying a label_user ("Anne") with one face on
+    # this image, then bind the cluster to a category. `--include-people`
+    # surfaces the validated face label as a flat dc:Subject keyword;
+    # categories_for_image emits the hierarchical entry.
+    run = s.create_face_run({"manual": True}, _now())
+    cid = s.add_face_cluster(run_id=run, cluster_no=0, size=1, label_auto="x", label_user="Anne")
+    fid = s.insert_face(
+        image_id=image_id,
+        bbox=[0, 0, 5, 5],
+        det_score=0.9,
+        embedding=np.ones(2, dtype=np.float32),
+        model_name="m",
+    )
+    s.assign_face_to_cluster(fid, cid, 0.0)
+    s.set_face_user_verified(fid, 1)
+    with s.transaction():
+        s.add_category("family")
+        s.map_face_cluster_to_category(cid, "family")
+    s.close()
+
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    runner = CliRunner()
+    r = runner.invoke(
+        app,
+        ["xmp", "write", str(tmp_path), "--threshold", "0.5", "--apply", "--include-people"],
+    )
+    assert r.exit_code == 0, r.output
+    payload = _last_json(r.stdout)
+    assert payload["written"] == 1
+    sc = sidecar_path(img)
+    assert sc.exists()
+    # Anne is the only verified face label on this photo → the only subject.
+    assert _read_subjects(sc) == ["Anne"]
+    proc = subprocess.run(
+        ["exiftool", "-j", "-XMP-lr:HierarchicalSubject", str(sc)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(proc.stdout or "[]")
+    hier = data[0].get("HierarchicalSubject") if data else None
+    if isinstance(hier, str):
+        hier = [hier]
+    assert hier == ["family|Anne"], hier
