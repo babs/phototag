@@ -143,22 +143,28 @@
     color: var(--muted); background: #f6f6f6; letter-spacing: 0.5px;
   }
   .filters .person { background: #fde6c4; color: #92400e; }
-  /* image lightbox — flex-column so image and info bar stack without
-     overlap. Content starts near the top so the small space above the
-     image just covers the absolutely-positioned X/Y counter and the
-     "faces (F)" toggle. */
+  /* image lightbox — flex-column. The stage flexes to fill the remaining
+     vertical space (between the small top header strip and the natural-
+     height info bar at the bottom), so the image fills as much screen as
+     possible without leaving dead margin top or bottom. */
   .lightbox {
     position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none;
     flex-direction: column; align-items: center; justify-content: flex-start;
-    z-index: 100; padding: 56px 20px 16px 20px; gap: 8px;
+    z-index: 100; padding: 44px 16px 12px 16px; gap: 6px;
   }
   .lightbox.show { display: flex; }
-  .lightbox img { max-width: 95vw; max-height: 72vh; display: block; }
-  .lightbox #lightbox-stage { position: relative; max-width: 95vw; max-height: 72vh; }
+  .lightbox #lightbox-stage {
+    position: relative; flex: 1 1 auto; min-height: 0;
+    max-width: 100%; display: flex; align-items: center; justify-content: center;
+  }
+  .lightbox img {
+    display: block; max-width: 100%; max-height: 100%;
+    width: auto; height: auto;
+  }
   .lightbox .info {
-    color: #fff; font-size: 12px; background: rgba(0,0,0,0.55);
-    padding: 8px 10px; border-radius: 4px;
-    max-width: 95vw; max-height: 22vh; overflow-y: auto; flex-shrink: 0;
+    flex: 0 0 auto; color: #fff; font-size: 12px;
+    background: rgba(0,0,0,0.55); padding: 8px 10px; border-radius: 4px;
+    max-width: 95vw; max-height: 24vh; overflow-y: auto;
   }
   .lightbox .close { position: absolute; top: 12px; right: 16px; color: #fff; font-size: 28px; cursor: pointer; user-select: none; }
   .lightbox .nav {
