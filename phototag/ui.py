@@ -22,6 +22,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from PIL import Image, ImageOps
 from pydantic import BaseModel
@@ -82,7 +83,9 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
+    project_root = Path(__file__).resolve().parent.parent
+    templates = Jinja2Templates(directory=str(project_root / "templates"))
+    app.mount("/static", StaticFiles(directory=str(project_root / "static")), name="static")
 
     @app.on_event("startup")
     def _open_store() -> None:
@@ -101,7 +104,15 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> Response:
-        return templates.TemplateResponse(request, "ui.html", {"title": "phototag"})
+        # `version` busts /static cache on every restart so a regenerated
+        # ui.css/ui.js takes effect on the next reload.
+        from time import time as _time
+
+        return templates.TemplateResponse(
+            request,
+            "ui.html",
+            {"title": "phototag", "version": int(_time())},
+        )
 
     @app.get("/api/runs")
     def api_runs() -> list[dict[str, Any]]:
