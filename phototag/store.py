@@ -1390,6 +1390,72 @@ class Store:
         )
         return [dict(r) for r in cur]
 
+    def list_triage_images(self, *, limit: int = 300) -> list[dict[str, Any]]:
+        """Photos needing user attention: at least one unverified named face,
+        or a duplicate-name (same `label_user` on ≥2 distinct unverified faces
+        of the same image — the ⚠ surfaced on the lightbox overlay today).
+
+        For each face, we resolve `label_user` via the most-recent
+        `face_cluster_assignments` row (matching `list_faces_for_image`'s
+        per-face latest-run rule) so a face is named iff its newest cluster
+        is named. `n_unverified` counts named faces with `user_verified IS
+        NULL OR 0`; `n_dups` counts distinct names that occur ≥2 times among
+        those unverified named faces. Score weights dups higher because they
+        are far more often a clustering error than a missing validation.
+        """
+        cur = self.conn.execute(
+            """
+            WITH latest AS (
+                SELECT
+                    f.id            AS face_id,
+                    f.image_id      AS image_id,
+                    f.user_verified AS user_verified,
+                    fc.label_user   AS label_user,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY f.id ORDER BY fc.run_id DESC
+                    ) AS rn
+                FROM faces f
+                JOIN face_cluster_assignments fca ON fca.face_id = f.id
+                JOIN face_clusters fc ON fc.id = fca.cluster_id
+            ),
+            named_unverified AS (
+                SELECT image_id, label_user
+                FROM latest
+                WHERE rn = 1
+                  AND label_user IS NOT NULL
+                  AND (user_verified IS NULL OR user_verified = 0)
+            ),
+            per_image AS (
+                SELECT image_id, COUNT(*) AS n_unverified
+                FROM named_unverified
+                GROUP BY image_id
+            ),
+            dup_groups AS (
+                SELECT image_id, COUNT(*) AS n_dups
+                FROM (
+                    SELECT image_id, label_user
+                    FROM named_unverified
+                    GROUP BY image_id, label_user
+                    HAVING COUNT(*) >= 2
+                ) g
+                GROUP BY image_id
+            )
+            SELECT i.id, i.path,
+                   COALESCE(p.n_unverified, 0) AS n_unverified,
+                   COALESCE(d.n_dups, 0)       AS n_dups,
+                   COALESCE(p.n_unverified, 0) + 2 * COALESCE(d.n_dups, 0) AS score
+            FROM images i
+            LEFT JOIN per_image  p ON p.image_id = i.id
+            LEFT JOIN dup_groups d ON d.image_id = i.id
+            WHERE COALESCE(p.n_unverified, 0) > 0
+               OR COALESCE(d.n_dups, 0)       > 0
+            ORDER BY score DESC, n_unverified DESC, i.id
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(r) for r in cur]
+
     def clear_noise_cluster_labels(self) -> int:
         """Wipe any user-label that was mistakenly applied to a noise cluster.
 

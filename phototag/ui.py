@@ -425,6 +425,17 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         face_count is the *unidentified* count for that photo, not the total."""
         return _store(app).list_images_with_unidentified_faces(limit=limit)
 
+    @app.get("/api/faces/triage")
+    def api_faces_triage(
+        limit: Annotated[int, Query(ge=1, le=2000)] = 300,
+    ) -> list[dict[str, Any]]:
+        """Photos needing user attention: ≥1 unverified named face OR a
+        duplicate name (same `label_user` on ≥2 faces of the photo).
+
+        Mirrors the response shape of `/api/faces/images` plus
+        `n_unverified`, `n_dups`, `score`. Sorted by `score DESC`."""
+        return _store(app).list_triage_images(limit=limit)
+
     @app.post("/api/faces/auto-attach-orphans")
     def api_auto_attach_orphans(
         threshold: float = 0.5,

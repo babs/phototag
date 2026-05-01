@@ -391,6 +391,55 @@ def test_unidentified_images_excludes_named(client: TestClient, seeded_db: Path)
     assert "/tmp/a.jpg" in paths
 
 
+def test_triage_queue(client: TestClient, seeded_db: Path) -> None:
+    """`/api/faces/triage` lists photos with at least one unverified named
+    face OR ≥2 same-name faces on the photo.
+
+    The seeded /tmp/a.jpg has a named, *not-yet-verified* face → it appears.
+    A second photo with two faces sharing the same name → also appears, with
+    `n_dups` ≥ 1. A fully-validated photo with a single named face stays out.
+    """
+    s = Store(seeded_db)
+    img_b = _image_id(s, "/tmp/b.jpg")
+    run = s.latest_face_run()
+    assert run is not None
+    # img_b: two faces sharing the same label_user → dup-name on this image.
+    cid_dup = s.add_face_cluster(run_id=run, cluster_no=20, size=2, label_auto=None, label_user="Carla")
+    f_b1 = _add_face(s, img_b, bbox=[0, 0, 30, 30])
+    f_b2 = _add_face(s, img_b, bbox=[40, 40, 30, 30])
+    s.assign_face_to_cluster(f_b1, cid_dup, 0.0)
+    s.assign_face_to_cluster(f_b2, cid_dup, 0.0)
+    # A third photo, single named + verified face → must NOT appear.
+    img_c = s.upsert_image(
+        path="/tmp/c.jpg",
+        hash_="h3",
+        mtime=3.0,
+        width=10,
+        height=10,
+        exif=None,
+        processed_at=_now(),
+    )
+    cid_ok = s.add_face_cluster(run_id=run, cluster_no=21, size=1, label_auto=None, label_user="Daniel")
+    f_c = _add_face(s, img_c, bbox=[5, 5, 30, 30])
+    s.assign_face_to_cluster(f_c, cid_ok, 0.0)
+    s.set_face_user_verified(f_c, 1)
+    s.close()
+
+    r = client.get("/api/faces/triage")
+    assert r.status_code == 200
+    by_path = {x["path"]: x for x in r.json()}
+    assert "/tmp/a.jpg" in by_path  # unverified named face
+    assert "/tmp/b.jpg" in by_path  # duplicate-name on the image
+    assert "/tmp/c.jpg" not in by_path  # already validated, not a dup
+    assert by_path["/tmp/b.jpg"]["n_dups"] >= 1
+    # Score: img_b carries the dup → must outrank a clean unverified-only row.
+    assert by_path["/tmp/b.jpg"]["score"] > by_path["/tmp/a.jpg"]["score"]
+    # Default sort puts highest-score first.
+    rows = r.json()
+    assert rows == sorted(rows, key=lambda x: (-x["score"], -x["n_unverified"], x["id"]))
+    assert {"id", "path", "n_unverified", "n_dups", "score"} <= rows[0].keys()
+
+
 def test_unidentified_summary(client: TestClient, seeded_db: Path) -> None:
     s = Store(seeded_db)
     img = _image_id(s, "/tmp/b.jpg")
