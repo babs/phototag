@@ -797,16 +797,33 @@ def faces_detect(
 def faces_cluster(
     min_size: Annotated[int, typer.Option("--min-size", help="HDBSCAN min_cluster_size")] = 3,
     min_samples: Annotated[int, typer.Option(help="HDBSCAN min_samples")] = 2,
+    tier3: Annotated[
+        bool,
+        typer.Option(
+            "--tier3-constraints",
+            help="Semi-supervised clustering: use must-link / cannot-link from face_corrections (#7)",
+        ),
+    ] = False,
 ) -> None:
-    """Cluster face embeddings into people; carry forward existing names."""
+    """Cluster face embeddings into people; carry forward existing names.
+
+    `--tier3-constraints` enables semi-supervised mode (must-link / cannot-link
+    surgery on the precomputed distance matrix). Tier-1 (replay named) and
+    tier-2 (replay unassigned via attach helper) post-passes still run on top.
+    """
     from .faces import cluster_faces
 
     settings = load_settings()
     log = get_logger("phototag.faces")
     store = Store(settings.db_path)
     try:
-        run_id = cluster_faces(store, min_cluster_size=min_size, min_samples=min_samples)
-        log.info("faces_cluster_run", run_id=run_id)
+        run_id = cluster_faces(
+            store,
+            min_cluster_size=min_size,
+            min_samples=min_samples,
+            tier3_constraints=tier3,
+        )
+        log.info("faces_cluster_run", run_id=run_id, tier3=tier3)
         typer.echo(f"face cluster run {run_id} created")
     finally:
         store.close()
@@ -1070,7 +1087,15 @@ def faces_clear_noise_labels() -> None:
 
 
 @faces_app.command("stats")
-def faces_stats() -> None:
+def faces_stats(
+    per_identity: Annotated[
+        bool,
+        typer.Option(
+            "--per-identity",
+            help="Include per-identity auto-attach sim distribution (#4)",
+        ),
+    ] = False,
+) -> None:
     """Quick counts: faces, clusters, runs, identities, unidentified, validated."""
     settings = load_settings()
     store = Store(settings.db_path)
@@ -1080,25 +1105,46 @@ def faces_stats() -> None:
         clusters = store.list_face_clusters(n_run) if n_run else []
         n_clusters = len(clusters)
         n_named = sum(1 for c in clusters if c["label_user"])
-        n_ids = len(store.list_face_identities())
+        identities = store.list_face_identities()
+        n_ids = len(identities)
         n_unidentified = store.count_unidentified_faces()
         n_user_verified = int(
             store.conn.execute("SELECT COUNT(*) AS n FROM faces WHERE user_verified=1").fetchone()["n"]
         )
-        typer.echo(
-            json.dumps(
-                {
-                    "faces": n_faces,
-                    "latest_run": n_run,
-                    "clusters_in_latest_run": n_clusters,
-                    "named_clusters": n_named,
-                    "identities": n_ids,
-                    "unidentified": n_unidentified,
-                    "user_verified": n_user_verified,
-                },
-                indent=2,
-            )
-        )
+        payload: dict[str, Any] = {
+            "faces": n_faces,
+            "latest_run": n_run,
+            "clusters_in_latest_run": n_clusters,
+            "named_clusters": n_named,
+            "identities": n_ids,
+            "unidentified": n_unidentified,
+            "user_verified": n_user_verified,
+        }
+        if per_identity:
+            # Mirrors `attach_face_to_best_identity`'s formula so the user can
+            # see exactly which threshold the next attach will face.
+            base_av = 0.7
+            rows = []
+            for i in identities:
+                sim_n = int(i.get("sim_n", 0))
+                sim_stddev = float(i.get("sim_stddev", 0.0))
+                if sim_n >= 5 and sim_stddev > 0.0:
+                    eff = min(0.95, max(base_av, base_av + 2.0 * sim_stddev))
+                else:
+                    eff = base_av
+                rows.append(
+                    {
+                        "name": i["name"],
+                        "n_samples": int(i["n_samples"]),
+                        "sim_n": sim_n,
+                        "sim_mean": round(float(i.get("sim_mean", 0.0)), 4),
+                        "sim_stddev": round(sim_stddev, 4),
+                        "auto_verify_threshold": round(eff, 4),
+                    }
+                )
+            rows.sort(key=lambda r: r["auto_verify_threshold"], reverse=True)
+            payload["per_identity"] = rows
+        typer.echo(json.dumps(payload, indent=2))
     finally:
         store.close()
 

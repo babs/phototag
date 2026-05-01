@@ -176,6 +176,23 @@ MIGRATIONS: list[str] = [
     ALTER TABLE face_cluster_assignments ADD COLUMN distance_kind TEXT;
     UPDATE face_cluster_assignments SET distance_kind = 'euclidean_umap' WHERE distance_kind IS NULL;
     """,
+    """
+    -- v10: per-identity running statistics on the auto-attach cosine similarity.
+    -- Used by `attach_face_to_best_identity` to widen the auto-validate band
+    -- for high-variance identities (kids whose embeddings drift across age,
+    -- subjects with frequent lighting/expression swings) — the *more
+    -- inconsistent* an identity has been, the higher we demand the next
+    -- match's sim climb before we mark it user_verified=1 on its own.
+    -- Welford running update fields:
+    --   sim_n      — number of auto-attaches folded in (n=0 → no stats yet)
+    --   sim_mean   — running mean of attach sims
+    --   sim_M2     — running sum of squared deltas (variance = M2 / (n-1))
+    -- Distinct from face_identities.n_samples, which counts every face linked
+    -- to the identity (including manual names) rather than just auto-attaches.
+    ALTER TABLE face_identities ADD COLUMN sim_n    INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE face_identities ADD COLUMN sim_mean REAL    NOT NULL DEFAULT 0.0;
+    ALTER TABLE face_identities ADD COLUMN sim_M2   REAL    NOT NULL DEFAULT 0.0;
+    """,
 ]
 
 
@@ -1699,9 +1716,15 @@ class Store:
         )
 
     def list_face_identities(self) -> list[dict[str, Any]]:
-        cur = self.conn.execute("SELECT id, name, centroid, dim, n_samples FROM face_identities")
+        cur = self.conn.execute(
+            "SELECT id, name, centroid, dim, n_samples, sim_n, sim_mean, sim_M2 FROM face_identities"
+        )
         out: list[dict[str, Any]] = []
         for row in cur:
+            sim_n = int(row["sim_n"])
+            sim_mean = float(row["sim_mean"])
+            sim_m2 = float(row["sim_M2"])
+            sim_var = sim_m2 / (sim_n - 1) if sim_n >= 2 else 0.0
             out.append(
                 {
                     "id": int(row["id"]),
@@ -1709,9 +1732,40 @@ class Store:
                     "centroid": np.frombuffer(row["centroid"], dtype=np.float32, count=int(row["dim"])),
                     "dim": int(row["dim"]),
                     "n_samples": int(row["n_samples"]),
+                    "sim_n": sim_n,
+                    "sim_mean": sim_mean,
+                    "sim_M2": sim_m2,
+                    # Sample stddev (Bessel-corrected); 0.0 until we've folded
+                    # at least 2 sims so callers can `if stddev:` safely.
+                    "sim_stddev": sim_var**0.5 if sim_var > 0 else 0.0,
                 }
             )
         return out
+
+    def record_identity_attach_sim(self, name: str, sim: float) -> None:
+        """Fold one fresh auto-attach cosine sim into the identity's running
+        Welford stats. No-op if the identity does not yet exist (caller is
+        expected to upsert first). Caller MUST hold a write transaction.
+
+        Algorithm (Welford, numerically stable):
+            n_new    = n + 1
+            delta    = x - mean
+            mean_new = mean + delta / n_new
+            delta2   = x - mean_new
+            M2_new   = M2 + delta * delta2
+
+        We fold this in SQL so we don't need a read-modify-write hop.
+        """
+        self.conn.execute(
+            """
+            UPDATE face_identities
+               SET sim_n    = sim_n + 1,
+                   sim_mean = sim_mean + (?1 - sim_mean) / (sim_n + 1),
+                   sim_M2   = sim_M2 + (?1 - sim_mean) * (?1 - (sim_mean + (?1 - sim_mean) / (sim_n + 1)))
+             WHERE name = ?2
+            """,
+            (float(sim), name),
+        )
 
     def upsert_face_identity(self, name: str, centroid: np.ndarray, n_samples: int) -> int:
         v = np.ascontiguousarray(centroid, dtype=np.float32)

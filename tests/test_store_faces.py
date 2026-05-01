@@ -671,3 +671,165 @@ def test_purge_faces(tmp_db: Path) -> None:
         assert len(store.list_face_identities()) == 0
     finally:
         store.close()
+
+
+def test_record_identity_attach_sim_welford(tmp_db: Path) -> None:
+    """Welford running update folds new sims into mean+M2 incrementally and
+    matches the offline two-pass formula. (#4 — per-identity threshold tuning)"""
+    store = Store(tmp_db)
+    try:
+        store.upsert_face_identity("Anne", np.array([1.0, 0.0], dtype=np.float32), n_samples=1)
+        sims = [0.85, 0.86, 0.84, 0.95, 0.55]
+        for s in sims:
+            with store.transaction():
+                store.record_identity_attach_sim("Anne", s)
+        ident = next(i for i in store.list_face_identities() if i["name"] == "Anne")
+        # Expected offline: mean = 0.81, var (Bessel) = 0.0247, stddev ≈ 0.157.
+        expected_mean = sum(sims) / len(sims)
+        expected_var = sum((x - expected_mean) ** 2 for x in sims) / (len(sims) - 1)
+        assert ident["sim_n"] == len(sims)
+        assert abs(ident["sim_mean"] - expected_mean) < 1e-6
+        assert abs(ident["sim_stddev"] - expected_var**0.5) < 1e-6
+    finally:
+        store.close()
+
+
+def test_record_identity_attach_sim_unknown_identity_is_noop(tmp_db: Path) -> None:
+    """Recording against a non-existent name does not error and leaves the
+    rest of the table alone — defensive: the attach helper guarantees the
+    identity exists, but a stray test or future caller might not."""
+    store = Store(tmp_db)
+    try:
+        with store.transaction():
+            store.record_identity_attach_sim("ghost", 0.9)
+        assert store.list_face_identities() == []
+    finally:
+        store.close()
+
+
+def test_attach_helper_per_identity_auto_verify_threshold(tmp_db: Path) -> None:
+    """A high-variance identity demands more confidence before auto-validation:
+    after folding 5 widely-spread sims, an attach at 0.75 (above the global
+    0.7 default) should NOT auto-validate."""
+    from phototag.faces import attach_face_to_best_identity
+
+    store = Store(tmp_db)
+    try:
+        anne = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        store.upsert_face_identity("Anne", anne, n_samples=10)
+        # Seed the running stats with high-variance prior attaches:
+        # mean ≈ 0.73, stddev ≈ 0.18 → effective auto-verify ≈ 0.7+0.36 = 1.06 → capped 0.95.
+        for s in [0.55, 0.95, 0.6, 0.85, 0.7]:
+            with store.transaction():
+                store.record_identity_attach_sim("Anne", s)
+        img = _add_image(store, path="/tmp/a.jpg")
+
+        # Synthesize an embedding with cosine to anne ≈ 0.75 (would normally
+        # auto-validate against the default 0.7 threshold).
+        emb = np.array([0.75, np.sqrt(1.0 - 0.75**2), 0.0], dtype=np.float32)
+        fid = store.insert_face(
+            image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=emb, model_name="m"
+        )
+        hit = attach_face_to_best_identity(store, fid, emb, image_id=img)
+        assert hit is not None and hit["name"] == "Anne"
+        # Per-identity widening kicked in → not auto-validated even at sim 0.75.
+        assert hit["user_verified"] is False, hit
+
+        # Sanity: a low-variance identity with the *same* embedding does
+        # auto-validate. Reset stats by rebuilding the identity.
+        store.delete_face_identity("Anne")
+        store.upsert_face_identity("Anne", anne, n_samples=10)
+        for s in [0.85, 0.84, 0.86, 0.85, 0.86]:
+            with store.transaction():
+                store.record_identity_attach_sim("Anne", s)
+        fid2 = store.insert_face(
+            image_id=img, bbox=[20, 20, 10, 10], det_score=0.9, embedding=emb, model_name="m"
+        )
+        hit2 = attach_face_to_best_identity(store, fid2, emb, image_id=img)
+        assert hit2 is not None and hit2["user_verified"] is True, hit2
+    finally:
+        store.close()
+
+
+def test_attach_helper_records_sim_after_attach(tmp_db: Path) -> None:
+    """Each successful attach must fold its own sim into the running stats so
+    the *next* attach faces the updated threshold."""
+    from phototag.faces import attach_face_to_best_identity
+
+    store = Store(tmp_db)
+    try:
+        anne = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        store.upsert_face_identity("Anne", anne, n_samples=5)
+        img = _add_image(store, path="/tmp/a.jpg")
+        emb = np.array([0.95, 0.05, 0.0], dtype=np.float32)
+        fid = store.insert_face(
+            image_id=img, bbox=[0, 0, 10, 10], det_score=0.9, embedding=emb, model_name="m"
+        )
+        hit = attach_face_to_best_identity(store, fid, emb, image_id=img)
+        assert hit is not None
+        ident = next(i for i in store.list_face_identities() if i["name"] == "Anne")
+        assert ident["sim_n"] == 1
+        # Mean equals the single recorded sim (which equals hit["sim"]).
+        assert abs(ident["sim_mean"] - float(hit["sim"])) < 1e-6
+    finally:
+        store.close()
+
+
+def test_tier3_build_constraint_edges(tmp_db: Path) -> None:
+    """`_build_tier3_constraint_edges` derives anchor-spoke must-link from
+    `named` corrections and full-fan cannot-link from `unassigned` rejections,
+    skipping faces that no longer exist in the current run. (#7)"""
+    from phototag.faces import _build_tier3_constraint_edges
+
+    store = Store(tmp_db)
+    try:
+        # Three faces named Anne, two named Bea, one rejecting Anne.
+        img = _add_image(store, path="/tmp/a.jpg")
+        run = store.create_face_run({}, _now())
+        anne_c = store.add_face_cluster(
+            run_id=run, cluster_no=0, size=3, label_user="Anne", label_auto="Anne"
+        )
+        bea_c = store.add_face_cluster(run_id=run, cluster_no=1, size=2, label_user="Bea", label_auto="Bea")
+        # Six faces total; the seventh fid is referenced by a correction but
+        # then deleted to validate that disappeared faces don't crash.
+        fids_anne = [_add_face(store, img) for _ in range(3)]
+        fids_bea = [_add_face(store, img) for _ in range(2)]
+        rejector = _add_face(store, img)
+        ghost = _add_face(store, img)
+
+        for f in fids_anne:
+            store.log_face_correction(face_id=f, image_id=img, action="named", cluster_id=anne_c, name="Anne")
+        for f in fids_bea:
+            store.log_face_correction(face_id=f, image_id=img, action="named", cluster_id=bea_c, name="Bea")
+        store.log_face_correction(face_id=ghost, image_id=img, action="named", cluster_id=anne_c, name="Anne")
+        # Rejector unassigned from a labelled-Anne cluster.
+        store.log_face_correction(face_id=rejector, image_id=img, action="unassigned", cluster_id=anne_c)
+
+        # ghost is in face_corrections but not in face_ids (deleted between
+        # corrections and now) — must be silently skipped.
+        face_ids = fids_anne + fids_bea + [rejector]
+
+        must, cannot = _build_tier3_constraint_edges(store, face_ids)
+
+        # Must-link: Anne anchor → 2 spokes (faces 1+2 of Anne); Bea → 1 spoke.
+        assert sorted(must) == sorted([(0, 1), (0, 2), (3, 4)])
+        # Cannot-link: rejector vs every Anne face (3 edges; ghost dropped).
+        rejector_idx = face_ids.index(rejector)
+        anne_indices = sorted(face_ids.index(f) for f in fids_anne)
+        assert sorted(cannot) == sorted([(rejector_idx, a) for a in anne_indices])
+    finally:
+        store.close()
+
+
+def test_tier3_apply_constraints_in_place(tmp_db: Path) -> None:
+    """`_apply_tier3_constraints` rewrites the precomputed distance matrix
+    in place: must-link → 0, cannot-link → 99 (the cap)."""
+    from phototag.faces import _TIER3_CANNOT_LINK_DISTANCE, _apply_tier3_constraints
+
+    D = np.array([[0.0, 1.0, 2.0], [1.0, 0.0, 3.0], [2.0, 3.0, 0.0]], dtype=np.float32)
+    _apply_tier3_constraints(D, must_link=[(0, 1)], cannot_link=[(0, 2)])
+    assert D[0, 1] == 0.0 and D[1, 0] == 0.0
+    assert D[0, 2] == _TIER3_CANNOT_LINK_DISTANCE
+    assert D[2, 0] == _TIER3_CANNOT_LINK_DISTANCE
+    # Untouched cell stays put.
+    assert D[1, 2] == 3.0

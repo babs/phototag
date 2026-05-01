@@ -147,7 +147,7 @@ def detect_faces_all(
 
     def _decode(args: tuple[int, str]) -> tuple[int, str, Image.Image | None]:
         image_id, path = args
-        return image_id, path, _open_image(Path(path))
+        return image_id, path, _open_image(store.absolute_path(path))
 
     def producer() -> None:
         try:
@@ -251,6 +251,106 @@ def _hungarian_identity_match(
     return out
 
 
+# Tier-3 sticky distance-matrix surgery: large pseudo-distance assigned to
+# cannot-link pairs. Has to be far enough above any real UMAP-Euclidean
+# pairwise distance that HDBSCAN's mutual-reachability never considers the
+# pair "close" — UMAP outputs typically fall in [0, ~12] for cosine input,
+# so 99.0 is a safe bright-line. Must-link gets 0.0 (closer than any
+# spontaneous neighbor), the dual case.
+_TIER3_CANNOT_LINK_DISTANCE = 99.0
+# Cap on cannot-link edges we materialise — protects against quadratic blow-up
+# on a corpus with hundreds of named faces and dozens of historical rejections.
+_TIER3_MAX_CANNOT_LINK_EDGES = 50_000
+
+
+def _build_tier3_constraint_edges(
+    store: Store,
+    face_ids: list[int],
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Derive must-link / cannot-link index pairs from `face_corrections`.
+
+    Indices are positions inside `face_ids` (the order the embedding matrix
+    was built in). We only emit pairs where BOTH endpoints exist in the
+    current run — a face that has been deleted between corrections and now
+    is silently skipped.
+
+    Must-link strategy: per name, pick the first face as the anchor and link
+    each other face to it (n-1 edges instead of n²). HDBSCAN's mutual-
+    reachability is transitive enough that an anchor-spoke star is treated
+    similarly to the full clique while keeping the matrix surgery O(n).
+
+    Cannot-link strategy: for every face that the user `unassigned` from a
+    labelled cluster, materialise edges against every face currently named
+    that label (via prior `named` corrections). Capped at
+    _TIER3_MAX_CANNOT_LINK_EDGES.
+    """
+    fid_to_idx = {fid: i for i, fid in enumerate(face_ids)}
+
+    by_name: dict[str, list[int]] = {}
+    for r in store.conn.execute(
+        "SELECT face_id, name FROM face_corrections "
+        "WHERE action='named' AND name IS NOT NULL AND face_id IS NOT NULL"
+    ):
+        idx = fid_to_idx.get(int(r["face_id"]))
+        if idx is None:
+            continue
+        by_name.setdefault(str(r["name"]), []).append(idx)
+
+    must_link: list[tuple[int, int]] = []
+    for indices in by_name.values():
+        if len(indices) < 2:
+            continue
+        # Dedupe (a face_id can have multiple `named` rows over time — same
+        # name still folds to a single anchor link).
+        uniq = sorted(set(indices))
+        anchor = uniq[0]
+        for other in uniq[1:]:
+            must_link.append((anchor, other))
+
+    cannot_link: list[tuple[int, int]] = []
+    for r in store.conn.execute(
+        """
+        SELECT fc.face_id AS face_id, c.label_user AS rejected_name
+          FROM face_corrections fc
+          JOIN face_clusters c ON c.id = fc.cluster_id
+         WHERE fc.action = 'unassigned'
+           AND fc.face_id IS NOT NULL
+           AND c.label_user IS NOT NULL
+        """
+    ):
+        idx_a = fid_to_idx.get(int(r["face_id"]))
+        if idx_a is None:
+            continue
+        targets = by_name.get(str(r["rejected_name"])) or []
+        for idx_b in targets:
+            if idx_a == idx_b:
+                continue
+            cannot_link.append((idx_a, idx_b))
+            if len(cannot_link) >= _TIER3_MAX_CANNOT_LINK_EDGES:
+                log.warning(
+                    "tier3_cannot_link_edges_capped",
+                    cap=_TIER3_MAX_CANNOT_LINK_EDGES,
+                )
+                return must_link, cannot_link
+    return must_link, cannot_link
+
+
+def _apply_tier3_constraints(
+    D: np.ndarray,
+    must_link: list[tuple[int, int]],
+    cannot_link: list[tuple[int, int]],
+) -> None:
+    """In-place surgery on a precomputed distance matrix. Cannot-link wins
+    if a pair appears in both sets — better to drop a real-but-rejected
+    similarity than keep a known-wrong one."""
+    for i, j in must_link:
+        D[i, j] = 0.0
+        D[j, i] = 0.0
+    for i, j in cannot_link:
+        D[i, j] = _TIER3_CANNOT_LINK_DISTANCE
+        D[j, i] = _TIER3_CANNOT_LINK_DISTANCE
+
+
 def cluster_faces(
     store: Store,
     *,
@@ -258,15 +358,30 @@ def cluster_faces(
     min_samples: int = 2,
     identity_match_threshold: float = 0.5,
     random_state: int = 42,
+    tier3_constraints: bool = False,
 ) -> int:
-    """Cluster all face embeddings, persist run, carry forward identity names."""
+    """Cluster all face embeddings, persist run, carry forward identity names.
+
+    `tier3_constraints=True` enables semi-supervised clustering (#7): pull
+    must-link pairs (same `named` name) and cannot-link pairs (`unassigned`
+    against a labelled cluster) from `face_corrections`, then surgically
+    rewrite the precomputed UMAP-Euclidean distance matrix before HDBSCAN.
+    The post-pass tier-1 (replay named) + tier-2 (replay unassigned via
+    attach helper) still run on top — tier-3 is a *during-clustering*
+    nudge, not a replacement.
+    """
     import hdbscan
     import umap
 
     face_ids, vectors = store.load_face_embeddings(MODEL_NAME)
     if vectors.shape[0] < min_cluster_size:
         raise ValueError(f"Not enough faces ({vectors.shape[0]}) for min_cluster_size={min_cluster_size}")
-    log.info("faces_cluster_started", n=int(vectors.shape[0]), dim=int(vectors.shape[1]))
+    log.info(
+        "faces_cluster_started",
+        n=int(vectors.shape[0]),
+        dim=int(vectors.shape[1]),
+        tier3=tier3_constraints,
+    )
 
     n_components = min(50, max(2, vectors.shape[0] - 2))
     n_neighbors = min(30, max(2, vectors.shape[0] - 1))
@@ -278,12 +393,32 @@ def cluster_faces(
         random_state=random_state,
     ).fit_transform(vectors)
 
-    labels = hdbscan.HDBSCAN(
-        min_cluster_size=min_cluster_size,
-        min_samples=min_samples,
-        metric="euclidean",
-        cluster_selection_method="eom",
-    ).fit_predict(reduced)
+    if tier3_constraints:
+        # Precompute a Euclidean distance matrix over the UMAP-reduced
+        # representation, surgically apply constraints, then HDBSCAN with
+        # `metric='precomputed'`. The N² memory cost (float32 * N²) is
+        # acceptable for our scale (a few thousand faces ≈ MB-range).
+        D = np.linalg.norm(reduced[:, None, :] - reduced[None, :, :], axis=-1).astype(np.float32)
+        must_link, cannot_link = _build_tier3_constraint_edges(store, list(face_ids))
+        _apply_tier3_constraints(D, must_link, cannot_link)
+        log.info(
+            "faces_cluster_tier3_applied",
+            must_link=len(must_link),
+            cannot_link=len(cannot_link),
+        )
+        labels = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            metric="precomputed",
+            cluster_selection_method="eom",
+        ).fit_predict(D.astype(np.float64))
+    else:
+        labels = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            metric="euclidean",
+            cluster_selection_method="eom",
+        ).fit_predict(reduced)
 
     members: dict[int, list[tuple[int, np.ndarray, np.ndarray]]] = {}
     for fid, lab, vec, rvec in zip(face_ids, labels, vectors, reduced, strict=True):
@@ -746,6 +881,8 @@ def attach_face_to_best_identity(
     second_sim = -1.0
     best_centroid: np.ndarray | None = None
     best_n = 0
+    best_sim_n = 0
+    best_sim_stddev = 0.0
     for ident in identities:
         if int(ident.get("dim", 0)) != edim:
             continue
@@ -758,6 +895,8 @@ def attach_face_to_best_identity(
             best_name = str(ident["name"])
             best_centroid = np.asarray(ident["centroid"], dtype=np.float32)
             best_n = int(ident.get("n_samples", 0)) or 0
+            best_sim_n = int(ident.get("sim_n", 0))
+            best_sim_stddev = float(ident.get("sim_stddev", 0.0))
         elif sim > second_sim:
             second_sim = sim
     if best_name is None or best_sim < threshold or best_centroid is None:
@@ -814,13 +953,24 @@ def attach_face_to_best_identity(
     blended = ((best_centroid * n_eff + emb) / max(1, n_eff + 1)).astype(np.float32, copy=False)
     store.upsert_face_identity(best_name, blended, n_samples=best_n + 1)
 
-    # Auto-validate only when the match is comfortably above threshold —
-    # marginal matches (sim in [threshold, auto_verify_threshold)) attach to
-    # the identity but stay un-validated so the user reviews them via the "?"
-    # marker and the validate-named bulk action.
-    auto_validated = best_sim >= auto_verify_threshold
+    # Per-identity auto-validate threshold — high-variance identities (kid
+    # whose face drifts as they grow, subject with wild lighting/expression
+    # swings) demand extra confidence before we mark the attach as validated
+    # on its own. We widen the band by 2σ of past auto-attach sims, capped at
+    # 0.95 so the threshold never goes so high it can never be reached.
+    # Need ≥5 prior auto-attaches before we trust the variance estimate; below
+    # that, fall back to the global default.
+    if best_sim_n >= 5 and best_sim_stddev > 0.0:
+        widened = auto_verify_threshold + 2.0 * best_sim_stddev
+        effective_auto_verify = min(0.95, max(auto_verify_threshold, widened))
+    else:
+        effective_auto_verify = auto_verify_threshold
+    auto_validated = best_sim >= effective_auto_verify
     if auto_validated:
         store.set_face_user_verified(face_id, 1)
+    # Fold this attach's sim into the running stats (after the threshold
+    # decision so the *next* attach is the one that benefits).
+    store.record_identity_attach_sim(best_name, float(best_sim))
     store.log_face_correction(
         face_id=face_id,
         image_id=image_id,
