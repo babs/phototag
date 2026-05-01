@@ -242,7 +242,9 @@ phototag/
   config.py
   settings.py       APP_* env-var bound via pydantic-settings
 
-static/             ui.css + ui.js (vanilla, single-file SPA)
+static/             ui.css + ui.js (esbuild bundle of static/src/*.js)
+static/src/         ESM modules — state, api, lightbox, sidebar,
+                    workspace, keyboard, runs, main
 templates/          ui.html, cluster.html.j2, index.html.j2
 specs/              design + roadmap + improvement plan
 tests/              pytest suites (CLI / Store / API / faces / EXIF)
@@ -256,7 +258,15 @@ make lint                  # pre-commit on all files
 uv run pytest              # fast tests (default)
 uv run pytest -m slow      # tests requiring downloaded models
 make test-cov              # term-missing + html + xml
+make js-build              # bundle static/src/*.js -> static/ui.js
+make js-watch              # same, in watch mode
 ```
+
+The frontend lives in `static/src/` as ESM modules and is bundled to a
+single ES2020 IIFE at `static/ui.js` by esbuild. After editing anything
+under `static/src/`, run `make js-build` (one-time `npm install` first to
+fetch esbuild). The bundle output is committed, so contributors who don't
+touch JS never need Node — `node_modules/` is gitignored.
 
 Project conventions: [`CLAUDE.md`](CLAUDE.md) (overrides apply
 project-wide; honored by both human and AI contributors).

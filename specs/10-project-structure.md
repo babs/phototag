@@ -40,11 +40,18 @@ phototag/
 │       ├── base.py           # Tagger / Embedder Protocols
 │       ├── ram.py            # RAM++ wrapper (lazy-imported behind [ram] extra)
 │       └── clip.py           # open_clip wrapper (lazy-imported behind [clip] extra)
-├── static/                   # served at /static — single-file SPA, no bundler
-│   ├── ui.js                 # vanilla JS — lightbox, face overlays, popover,
-│   │                         #   sidebar filter, triage queue, fringe view,
-│   │                         #   keyboard shortcuts, hash sync
-│   └── ui.css
+├── static/                   # served at /static
+│   ├── ui.js                 # esbuild bundle of static/src/* (committed; ES2020 IIFE)
+│   ├── ui.css
+│   └── src/                  # ESM source modules (run `make js-build` after edits)
+│       ├── state.js          # shared mutable UI state
+│       ├── api.js            # fetch helper, $ / html / escape, asset URL builder
+│       ├── lightbox.js       # lightbox, face overlays, popover, validate-and-advance
+│       ├── sidebar.js        # cluster filter, top-tags, view switcher, faces panel
+│       ├── workspace.js      # cluster / search / person / triage / orphan views
+│       ├── keyboard.js       # global key handlers + help overlay
+│       ├── runs.js           # loadRuns + URL hash sync
+│       └── main.js           # entry: wires everything, exposes window.{toggleHelp,closeLightbox,navLightbox}
 ├── templates/
 │   ├── ui.html               # SPA shell (renders /static/ui.js + window.PHOTOTAG_API_TOKEN)
 │   ├── cluster.html.j2       # report per-cluster page
@@ -64,9 +71,16 @@ phototag/
 │   ├── progress.sh
 │   └── refine_noise.py       # standalone image-cluster noise-refinement script
 ├── specs/                    # design docs (this file is one of them)
+├── package.json              # esbuild devDependency for the JS bundler
+├── package-lock.json         # esbuild lockfile (committed)
 └── data/                     # gitignored; DBs, model weights, EXIF cache, thumbs,
                               #   preview JPEGs, face thumbnails, server logs, backups
 ```
+
+`node_modules/` is gitignored. After editing anything under `static/src/`,
+run `make js-build` (or `make js-watch` during development) to regenerate
+`static/ui.js`. The bundle is committed so contributors who don't touch JS
+never need `npm install`.
 
 Schema migrations live inline in `phototag/store.py:MIGRATIONS` (a list
 of SQL strings; numbered v1–v8 in code comments). Each migration is
