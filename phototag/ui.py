@@ -109,13 +109,16 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> Response:
         # `version` busts /static cache on every restart so a regenerated
-        # ui.css/ui.js takes effect on the next reload.
+        # ui.css/ui.js takes effect on the next reload. The page itself
+        # must NOT be cached, or the browser keeps serving an old `?v=`
+        # and never picks up the regenerated bundles.
         from time import time as _time
 
         return templates.TemplateResponse(
             request,
             "ui.html",
             {"title": "phototag", "version": int(_time())},
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
         )
 
     @app.get("/api/runs")
