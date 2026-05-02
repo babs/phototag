@@ -52,12 +52,25 @@ def _read_subjects(sidecar: Path) -> list[str]:
 def test_write_sidecar_round_trip(tmp_path: Path) -> None:
     img = tmp_path / "cat.jpg"
     _make_jpeg(img)
+    # Capture source bytes + mtime before the write so we can assert the
+    # original photo is byte-identical afterwards. This is the critical
+    # invariant: exiftool's `-o <out>` flips between "create sidecar"
+    # and "edit source in place" based on the output's file extension.
+    # An accidental `.tmp` (or any non-`.xmp`) suffix on our tmp file
+    # would silently DELETE the user's photo. Hard regression guard.
+    src_bytes = img.read_bytes()
+    src_mtime = img.stat().st_mtime
     sidecar, written = write_sidecar(img, dc_subject=["cat", "kitten"])
     assert written is True
     assert sidecar == sidecar_path(img)
     assert sidecar.exists()
     # The original photo is never touched — exiftool wrote the XMP only.
     assert img.exists()
+    assert img.read_bytes() == src_bytes
+    assert img.stat().st_mtime == src_mtime
+    # And no `.tmp` / `.partial` litter survived (atomic rename happened).
+    leftovers = [p for p in tmp_path.iterdir() if p.name not in {img.name, sidecar.name} and p.is_file()]
+    assert leftovers == [], f"unexpected leftovers: {leftovers}"
     subjects = _read_subjects(sidecar)
     assert sorted(subjects) == ["cat", "kitten"]
 
@@ -118,7 +131,7 @@ def test_xmp_write_cli_dry_run_then_apply(tmp_path: Path, monkeypatch: pytest.Mo
     _make_jpeg(img)
     s = Store(db)
     img_id = s.upsert_image(
-        path=str(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
+        path=s.relative_path(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
     )
     s.replace_image_tags(img_id, "ram_v1", [("cat", 0.9), ("low", 0.2)])
     s.close()
@@ -150,7 +163,9 @@ def test_xmp_clean_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     img = tmp_path / "scene.jpg"
     _make_jpeg(img)
     s = Store(db)
-    s.upsert_image(path=str(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now())
+    s.upsert_image(
+        path=s.relative_path(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
+    )
     s.close()
     write_sidecar(img, dc_subject=["x"])
     assert sidecar_path(img).exists()
@@ -181,7 +196,7 @@ def test_xmp_write_emits_hierarchical_categories(tmp_path: Path, monkeypatch: py
     _make_jpeg(img)
     s = Store(db)
     image_id = s.upsert_image(
-        path=str(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
+        path=s.relative_path(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
     )
     s.replace_image_tags(image_id, "ram_plus", [("x-ray", 0.9)])
     with s.transaction():
@@ -226,7 +241,7 @@ def test_xmp_write_emits_hierarchical_for_cluster_rule(
     _make_jpeg(img)
     s = Store(db)
     image_id = s.upsert_image(
-        path=str(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
+        path=s.relative_path(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
     )
     # Build a face cluster carrying a label_user ("Anne") with one face on
     # this image, then bind the cluster to a category. `--include-people`
@@ -284,7 +299,7 @@ def test_xmp_write_per_image_override_short_circuits(tmp_path: Path, monkeypatch
     _make_jpeg(img)
     s = Store(db)
     image_id = s.upsert_image(
-        path=str(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
+        path=s.relative_path(img), hash_="h", mtime=1.0, width=8, height=8, exif=None, processed_at=_now()
     )
     # Tag rule maps "x-ray" → medical.
     s.replace_image_tags(image_id, "ram_plus", [("x-ray", 0.9)])

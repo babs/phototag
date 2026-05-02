@@ -108,12 +108,16 @@ def write_sidecar(
                 log.debug("xmp_skip_unchanged", path=str(image_path))
                 return sidecar, False
 
-    # exiftool's `-o <sidecar> <image>` writes a fresh XMP-only sidecar
-    # WITHOUT touching the source. `-overwrite_original` ensures we replace
-    # any pre-existing file at the temp path without leaving a `_original`
-    # backup. `-P` preserves the source mtime so subsequent scans see the
-    # photo as unchanged.
-    tmp = sidecar.with_name(f".{sidecar.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    # exiftool's `-o <out> <image>` switches behaviour on the output
+    # extension. For `.xmp` it creates a fresh XMP-only sidecar and
+    # leaves the source untouched. For ANY other extension (including
+    # `.tmp`!) it edits the source in-place and moves it to the output
+    # path — i.e. the original photo *disappears*. Naming the tmp with
+    # a `.xmp` suffix keeps us on the sidecar branch.
+    # `-overwrite_original` replaces any pre-existing file at the tmp
+    # path without leaving a `_original` backup. `-P` preserves the
+    # source mtime so subsequent scans see the photo as unchanged.
+    tmp = sidecar.with_name(f".{sidecar.name}.{os.getpid()}.{secrets.token_hex(4)}.partial.xmp")
     if tmp.exists():
         tmp.unlink()
     cmd: list[str] = [exiftool, "-overwrite_original", "-P"]
