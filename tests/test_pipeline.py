@@ -256,3 +256,32 @@ def test_scan_and_tag_surfaces_producer_crash_in_failed(
         assert counts["failed"] == 4
     finally:
         store.close()
+
+
+def test_embed_all_surfaces_producer_crash_in_failed(
+    tmp_path: Path, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Symmetric to scan_and_tag's producer-crash test: if embed_all's
+    decode producer dies (non-OSError escapes `_open_image`), the run
+    summary must NOT report `failed=0`. Without the `decode_error`
+    out-param + `seen_rows` accounting, all `len(todo)` rows would be
+    silently dropped and the user would see a green run."""
+    from phototag import pipeline
+
+    _seed_corpus(tmp_path / "corpus", n=3)
+    store = Store(tmp_db)
+    try:
+        scan_and_tag(tmp_path / "corpus", store, FakeTagger(threshold=0.0))
+
+        def boom(_path: Path) -> None:
+            raise RuntimeError("synthetic decode failure")
+
+        monkeypatch.setattr(pipeline, "_open_image", boom)
+        counts = pipeline.embed_all(store, FakeEmbedder(dim=8))
+        # Producer dies on first ex.map call → seen_rows = 0; all 3
+        # todo rows must surface as `failed`, embedded must stay 0.
+        assert counts["total"] == 3
+        assert counts["embedded"] == 0
+        assert counts["failed"] == 3
+    finally:
+        store.close()

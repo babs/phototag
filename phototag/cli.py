@@ -714,7 +714,19 @@ def rename_bulk(
                 if store.get_cluster(cid) is None:
                     skipped.append(f"cluster {cid} not found")
                     continue
-                store.set_cluster_label_user(cid, v if v else None)
+                # Validate the value type before binding. SQLite would raise
+                # InterfaceError on list/dict/tuple and silently coerce
+                # numbers/bools to confusing TEXT — both are bad. Strings
+                # (incl. empty → cleared) and explicit null are the only
+                # legal payloads; everything else gets a clean skip.
+                if v is None or v == "":
+                    label: str | None = None
+                elif isinstance(v, str):
+                    label = v
+                else:
+                    skipped.append(f"non-string value for cluster {cid}: {type(v).__name__}")
+                    continue
+                store.set_cluster_label_user(cid, label)
                 n += 1
     finally:
         store.close()

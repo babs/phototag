@@ -540,3 +540,51 @@ def test_rename_bulk_non_numeric_keys_skipped(tmp_path: Path, monkeypatch: pytes
     assert "renamed 0" in r.output
     assert "non-numeric key" in r.output
     assert "cluster 99999 not found" in r.output
+
+
+def test_rename_bulk_non_string_value_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-string JSON values (list/dict/number/bool) must be skipped
+    cleanly, not bubble out as `sqlite3.InterfaceError` mid-transaction.
+    Regression guard: prior code passed values straight to
+    `set_cluster_label_user`, where SQLite either coerced numbers to
+    confusing TEXT or crashed the entire bulk on list/dict/tuple."""
+    from phototag.store import Store
+
+    db = _seed_two_images(tmp_path)
+    # Seed a real cluster so the value path is actually exercised
+    # (skip-on-not-found would mask the bug otherwise).
+    store = Store(db)
+    try:
+        with store.transaction():
+            run_id = store.create_cluster_run({"src": "test"}, created_at="2026-05-02T00:00:00Z")
+            cid_list = store.add_cluster(run_id=run_id, cluster_no=0, size=1, label_auto="A")
+            cid_dict = store.add_cluster(run_id=run_id, cluster_no=1, size=1, label_auto="B")
+            cid_num = store.add_cluster(run_id=run_id, cluster_no=2, size=1, label_auto="C")
+            cid_ok = store.add_cluster(run_id=run_id, cluster_no=3, size=1, label_auto="D")
+    finally:
+        store.close()
+
+    monkeypatch.setenv("APP_DB_PATH", str(db))
+    payload = tmp_path / "rename.json"
+    payload.write_text(
+        f'{{"{cid_list}": [1,2], "{cid_dict}": {{"x":1}}, "{cid_num}": 42, "{cid_ok}": "Real Name"}}'
+    )
+    runner = CliRunner()
+    r = runner.invoke(app, ["rename-bulk", str(payload)])
+    assert r.exit_code == 0, r.output
+    # Only the string-valued row landed; the three bad ones were skipped
+    # with a typed reason, not a traceback.
+    assert "renamed 1" in r.output
+    assert f"non-string value for cluster {cid_list}: list" in r.output
+    assert f"non-string value for cluster {cid_dict}: dict" in r.output
+    assert f"non-string value for cluster {cid_num}: int" in r.output
+
+    # Verify the good row actually persisted (proves the txn didn't
+    # roll back on a bad neighbour).
+    store = Store(db)
+    try:
+        c = store.get_cluster(cid_ok)
+        assert c is not None
+        assert c["label_user"] == "Real Name"
+    finally:
+        store.close()
