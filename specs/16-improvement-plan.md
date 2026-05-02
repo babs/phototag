@@ -106,45 +106,26 @@ Specs aligned: 02 (Python 3.14), 03 (v5/v6/v7/v9 schema), 09 (full CLI),
 11 (roadmap status), 12 (memory budget), 13 (UI exposure), 15 (face API
 + recluster + auto-attach + IoU semantics).
 
-## Picking the next sprint
+## Current state
 
-Six items remain (⬜ above) — listed by daily-flow ROI:
+All 29 numbered items above are 🟢. The original v1/v2 surface plus the
+follow-on portability, ops, and UX items have all shipped. There is no
+named "next sprint" pending against this plan — new work lands as
+ad-hoc items appended to the table or as separate specs.
 
-**Matching quality** (1 day each):
-- **#4** — per-identity threshold tuning. Use the per-attach sim
-  distributions we collect to raise `auto_verify_threshold` for
-  high-variance identities (kids growing, glasses on/off).
-- **#12** — re-cluster preview members. The dry-run already returns the
-  cluster IDs; surface the ~5 faces nearest each centroid in a UI
-  expander before persisting.
+## Where the next investment likely goes
 
-**v2 leftover** (1 day):
-- **#23** — categories + tag/cluster mapping (see `08-xmp-categories.md`).
-  Pairs with the now-shipped #22 XMP writer to populate the `lr:HierarchicalSubject`
-  field.
+Not gating anything; recorded so future sessions don't have to
+re-derive it.
 
-**Portability** — *shipped*:
-- **#26** — photo paths now stored relative to the DB's parent directory
-  (no `meta.photo_root` needed; anchor is implicit). `data/photo-corpus`
-  symlink renamed to `data/pictures`. `Store.absolute_path()` /
-  `Store.relative_path()` are the canonical accessors; absolute strings
-  still resolve unchanged for legacy rows and tests using `/tmp`.
-
-**Bigger swing** (~2 days each):
-- **#7** — constrained HDBSCAN (tier-3 sticky). Semi-supervised cluster
-  pass that consumes both `named` and `unassigned` corrections as
-  must-link / cannot-link constraints during clustering itself (today
-  cannot-link is enforced post-cluster at the identity-match step).
-  Best-quality clustering improvement; likely new dependency.
-- **#13** — drag-to-redraw bbox (deferred). Per-image bbox edit + re-embed
-  via insightface. Largest UX upside but heaviest impl. Skipped this
-  sprint pending a clearer design discussion.
-
-**Infra** (independent track, deferred):
-- **#24** — CI pipeline. GitHub Actions: ruff + mypy + pytest -m "not
-  slow"; nightly slow run. Long-shot at the moment.
-
-Recommended next pick: **#26** (photo paths relative) before any user
-ships a real corpus — it's a schema change that cascades everywhere file
-paths are read, easier to do while no real user data depends on the
-current shape. Then **#23** to round out the v2 surface.
+- **Test coverage on operational surfaces.** Overall ~58%. The gaps
+  worth closing first are `xmp.py` (~14% — sidecar safety, idempotency
+  edges), `cli.py` error branches (~49% — exit codes / hostile input),
+  and `faces.py` verify/refine paths (~45%). The 0% modules
+  (`clustering`, `geo`, `reporting`) are heavy/optional and lower
+  priority — covering them needs ML extras or sample fixtures, and a
+  regression there is loud rather than silent.
+- **Library-bundle move regression test.** The
+  `db_path.parent`-as-anchor refactor (caches + backups follow
+  `APP_DB_PATH`) is exercised transitively by existing fixtures but
+  has no dedicated test. ~10 lines if/when it bites.
